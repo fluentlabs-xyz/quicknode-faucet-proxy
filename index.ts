@@ -142,6 +142,8 @@ app.post("/api/wallets/ban", async (req, res) => {
   }
 });
 
+// Endpoints for partner admin dashboard
+
 app.get("/partners/distributors", async (req, res) => {
   try {
     const response = await axios.get(`${QUICKNODE_API}/partners/distributors`, {
