@@ -144,8 +144,35 @@ app.post("/api/wallets/ban", async (req, res) => {
 
 app.get("/partners/distributors", async (req, res) => {
   try {
+    const response = await axios.get(`${QUICKNODE_API}/partners/distributors`, {
+      headers: { "x-partner-api-key": PARTNER_API_KEY },
+    });
+    res.status(response.status).json(response.data);
+  } catch (error: any) {
+    res
+      .status(error.response?.status || 500)
+      .json(error.response?.data || { error: "Server error" });
+  }
+});
+
+app.get("/partners/global-rules", async (req, res) => {
+  try {
+    const response = await axios.get(`${QUICKNODE_API}/partners/global-rules`, {
+      headers: { "x-partner-api-key": PARTNER_API_KEY },
+    });
+    res.status(response.status).json(response.data);
+  } catch (error: any) {
+    res
+      .status(error.response?.status || 500)
+      .json(error.response?.data || { error: "Server error" });
+  }
+});
+
+app.get("/partners/distributors/:uuid/rules", async (req, res) => {
+  const { uuid } = req.params;
+  try {
     const response = await axios.get(
-      `${QUICKNODE_API}/partners/distributors`,
+      `${QUICKNODE_API}/partners/distributors/${uuid}/rules`,
       { headers: { "x-partner-api-key": PARTNER_API_KEY } }
     );
     res.status(response.status).json(response.data);
@@ -155,7 +182,6 @@ app.get("/partners/distributors", async (req, res) => {
       .json(error.response?.data || { error: "Server error" });
   }
 });
-
 
 // Health check endpoint
 app.get("/healthz", (_, res) => res.status(200).json({ status: "ok" }));
