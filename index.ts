@@ -12,6 +12,7 @@ app.use(cors({ origin: process.env.ALLOWED_ORIGINS?.split(",") }));
 
 const QUICKNODE_API = "https://api.faucet.quicknode.com";
 const DISTRIBUTOR_API_KEY = process.env.DISTRIBUTOR_API_KEY;
+const PARTNER_API_KEY = process.env.PARTNER_API_KEY;
 const RECAPTCHA_SECRET = process.env.RECAPTCHA_SECRET;
 
 // const validateRecaptcha = async (token: string) => {
@@ -140,6 +141,21 @@ app.post("/api/wallets/ban", async (req, res) => {
       .json(error.response?.data || { error: "Server error" });
   }
 });
+
+app.get("/partners/distributors", async (req, res) => {
+  try {
+    const response = await axios.get(
+      `${QUICKNODE_API}/partners/distributors`,
+      { headers: { "x-partner-api-key": PARTNER_API_KEY } }
+    );
+    res.status(response.status).json(response.data);
+  } catch (error: any) {
+    res
+      .status(error.response?.status || 500)
+      .json(error.response?.data || { error: "Server error" });
+  }
+});
+
 
 // Health check endpoint
 app.get("/healthz", (_, res) => res.status(200).json({ status: "ok" }));
