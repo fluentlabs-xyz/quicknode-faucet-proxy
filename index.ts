@@ -15,20 +15,20 @@ const DISTRIBUTOR_API_KEY = process.env.DISTRIBUTOR_API_KEY;
 const PARTNER_API_KEY = process.env.PARTNER_API_KEY;
 const RECAPTCHA_SECRET = process.env.RECAPTCHA_SECRET;
 
-// const validateRecaptcha = async (token: string) => {
-//   const res = await axios.post(
-//     `https://www.google.com/recaptcha/api/siteverify`,
-//     new URLSearchParams({
-//       secret: RECAPTCHA_SECRET!,
-//       response: token,
-//     }),
-//   );
-//   return res.data.success && res.data.score >= 0.8;
-// };
-
 const validateRecaptcha = async (token: string) => {
-  return true;
+  const res = await axios.post(
+    `https://www.google.com/recaptcha/api/siteverify`,
+    new URLSearchParams({
+      secret: RECAPTCHA_SECRET!,
+      response: token,
+    }),
+  );
+  return res.data.success && res.data.score >= 0.8;
 };
+
+// const validateRecaptcha = async (token: string) => {
+//   return true;
+// };
 
 const getClientIP = (req: express.Request) =>
   (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ||
@@ -134,49 +134,6 @@ app.post("/api/wallets/ban", async (req, res) => {
       { headers: { "x-partner-api-key": DISTRIBUTOR_API_KEY } }
     );
 
-    res.status(response.status).json(response.data);
-  } catch (error: any) {
-    res
-      .status(error.response?.status || 500)
-      .json(error.response?.data || { error: "Server error" });
-  }
-});
-
-// Endpoints for partner admin dashboard
-
-app.get("/partners/distributors", async (req, res) => {
-  try {
-    const response = await axios.get(`${QUICKNODE_API}/partners/distributors`, {
-      headers: { "x-partner-api-key": PARTNER_API_KEY },
-    });
-    res.status(response.status).json(response.data);
-  } catch (error: any) {
-    res
-      .status(error.response?.status || 500)
-      .json(error.response?.data || { error: "Server error" });
-  }
-});
-
-app.get("/partners/global-rules", async (req, res) => {
-  try {
-    const response = await axios.get(`${QUICKNODE_API}/partners/global-rules`, {
-      headers: { "x-partner-api-key": PARTNER_API_KEY },
-    });
-    res.status(response.status).json(response.data);
-  } catch (error: any) {
-    res
-      .status(error.response?.status || 500)
-      .json(error.response?.data || { error: "Server error" });
-  }
-});
-
-app.get("/partners/distributors/:uuid/rules", async (req, res) => {
-  const { uuid } = req.params;
-  try {
-    const response = await axios.get(
-      `${QUICKNODE_API}/partners/distributors/${uuid}/rules`,
-      { headers: { "x-partner-api-key": PARTNER_API_KEY } }
-    );
     res.status(response.status).json(response.data);
   } catch (error: any) {
     res
