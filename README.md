@@ -1,57 +1,68 @@
 # QuickNode Faucet Distributor Backend
 
-Backend proxy and minimal admin dashboard for managing and monitoring QuickNode faucet distributors.
-
----
-
-## Structure
-
-- `index.ts` — Express backend (proxy for QuickNode Partner API, safe key storage)
-- `partnet-admin/` — Minimal frontend (dashboard for distributors and global rules)
+Backend service for secure integration with the QuickNode Faucet API as a **distributor**.
 
 ---
 
 ## Features
 
-- **Distributors list:** View all faucet distributors (name, uuid)
-- **Distributor rules:** View rules for each distributor (on demand)
-- **Global rules:** View current global rules for your faucet partner account
+- Proxy for QuickNode faucet distributor endpoints (`claim`, `can-claim`, `code`, `ban wallet`)
+- reCaptcha v3 verification (score >= 0.8 required)
+- IP and visitorId anti-abuse forwarding
+- Never exposes API keys to frontend or users
 
 ---
 
-## Usage
+## Endpoints
 
-1. **Install backend dependencies**  
+- `POST /api/claim` — Drip tokens to a wallet
+- `POST /api/can-claim` — Check if a wallet can currently claim
+- `GET /api/claim/:transactionId` — Get claim transaction status
+- `POST /api/codes` — Generate one-time claim codes (optional)
+- `POST /api/wallets/ban` — Ban a wallet (optional)
+- `GET /healthz` — Health check
+
+---
+
+## Setup
+
+1. Install dependencies:
 
     ```bash
     bun install
     ```
 
-2. **Configure .env** (API keys, allowed origins, etc.)
-3. **Run backend**
+2. Create a `.env` file:
+
+    ```
+    DISTRIBUTOR_API_KEY=your_distributor_key
+    RECAPTCHA_SECRET=your_recaptcha_secret
+    ALLOWED_ORIGINS=http://localhost:5173
+    PORT=8080
+    ```
+
+3. Run the backend:
 
     ```bash
     bun run index.ts
     ```
 
-4. **Frontend (partnet-admin):**
+---
 
-    ```bash
-    cd partnet-admin
-    npm install
-    npm run dev
-    ```
+## Usage Notes
 
-    Open [http://localhost:5173](http://localhost:5173) in your browser.
+- All requests to QuickNode Faucet API are done **server-side only**.
+- reCaptcha v3 is required for all `/claim` and `/can-claim` requests (score >= 0.8).
+- Do **not** expose any API keys in frontend code.
+- IP and visitorId should be sent from the client app to backend for anti-abuse.
+- You may implement rate limiting or monitoring on the backend.
 
 ---
 
 ## Documentation
 
-- **Full API details:**  
-  [Partner Faucet API Documentation (Google Doc)](https://docs.google.com/document/d/1K5TbGKPmH0Cb5DNsf_uwY85K3gOw0310SxECDHgnB_c/edit?tab=t.0)
+See the [Partner Faucet API Documentation (Google Doc)](https://docs.google.com/document/d/1K5TbGKPmH0Cb5DNsf_uwY85K3gOw0310SxECDHgnB_c/edit?tab=t.0) for full details.
 
 ---
 
-> This project is focused on **monitoring and support for faucet distributors**.  
-> No edit/create/delete actions — for data visibility and quick troubleshooting.
+**This backend is intended for distributors only — do not use the partner API key here!**
