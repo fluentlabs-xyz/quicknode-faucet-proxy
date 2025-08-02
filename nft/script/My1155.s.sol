@@ -15,7 +15,7 @@ contract Deploy is Script {
 
 contract Mint is Script {
     function run() external {
-        address nft = 0x7DB790B55299b474c2269105Ff6Cd48f56520a2A;
+        address nft = 0x029B3855f8558B13C61691F703693E2Ac9E46A16;
 
         vm.startBroadcast();
 
@@ -25,6 +25,6 @@ contract Mint is Script {
     }
 }
 
-// cast call 0x7DB790B55299b474c2269105Ff6Cd48f56520a2A "balanceOf(address,uint256)" 0x8f22F1F08EF83ad6A060d1B01bf2284b162b71d8 1 --rpc-url https://rpc.dev.gblend.xyz
+// cast call 0x029B3855f8558B13C61691F703693E2Ac9E46A16 "balanceOf(address,uint256)" 0x8f22F1F08EF83ad6A060d1B01bf2284b162b71d8 1 --rpc-url https://rpc.dev.gblend.xyz
 
 // 0x0000000000000000000000000000000000000000000000000000000000000001
