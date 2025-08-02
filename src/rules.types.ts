@@ -1,4 +1,3 @@
-// rules.types.ts
 export type DistributorRuleKey =
   | "TOTAL_DRIP_PER_INTERVAL"
   | "TOTAL_DRIP_INTERVAL"

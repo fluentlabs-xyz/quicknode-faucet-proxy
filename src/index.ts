@@ -1,102 +1,172 @@
-import express from "express";
-import cors from "cors";
-import dotenv from "dotenv";
-import axios from "axios";
-
-import {
-  DISTRIBUTOR_API_KEY,
-  NFT_CONTRACT_ADDRESS,
-  QUICKNODE_API,
-  TOKEN_ID,
-} from "./config";
+import { Elysia } from "elysia";
+import { cors } from "@elysiajs/cors";
+import { queries, ensureClaimsTable } from "./db";
+import { NFT_CONTRACT_ADDRESS, TOKEN_ID } from "./config";
 import { validateNFTOwnership, verifyParaWalletAddress } from "./validate";
 import { validateParaJwt } from "./jwt";
+import { quickNodeService, type QuickNodeClaimRequest } from "./quicknode";
 
-// Load environment variables
-dotenv.config();
+// Create tables at startup
+await ensureClaimsTable();
 
-const app = express();
-app.use(express.json());
-app.use(cors({ origin: process.env.ALLOWED_ORIGINS?.split(",") }));
+// Bun-optimized claim processing function
+async function processClaim(
+  token: string,
+  visitorId: string,
+  request: Request
+): Promise<any> {
+  // Validate JWT first (fast fail)
+  const jwtResult = await validateParaJwt(token);
+  if (!jwtResult.valid) {
+    throw { status: 401, message: "Invalid token", details: jwtResult.error };
+  }
 
-const getClientIP = (req: express.Request) =>
-  (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ||
-  req.socket.remoteAddress;
+  // Extract wallets
+  const { wallets, externalWallets } = jwtResult.payload.data || {};
+  const embeddedWallet = wallets?.find((w: any) => w.type === "EVM")?.address;
+  const externalWallet = externalWallets?.find(
+    (w: any) => w.type === "EVM"
+  )?.address;
 
-app.post("/claim", async (req, res) => {
-  try {
-    const visitorId = req.body.visitorId;
-    if (!visitorId) {
-      return res.status(400).json({ error: "Missing visitorId (fingerprint)" });
-    }
+  if (!embeddedWallet || !externalWallet) {
+    throw { status: 400, message: "Wallets not found in token" };
+  }
 
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return res
-        .status(401)
-        .json({ error: "Missing or invalid Authorization header" });
-    }
-    const token = authHeader.replace(/^Bearer\s+/i, "");
-
-    const jwtResult = await validateParaJwt(token);
-    if (!jwtResult.valid) {
-      return res
-        .status(401)
-        .json({ error: "Invalid token", details: jwtResult.error });
-    }
-
-    const { wallets, externalWallets } = jwtResult.payload.data || {};
-    const embeddedWallet = wallets?.find((w: any) => w.type === "EVM")?.address;
-    const externalWallet = externalWallets?.find(
-      (w: any) => w.type === "EVM"
-    )?.address;
-
-    if (!embeddedWallet || !externalWallet) {
-      return res.status(400).json({ error: "Wallets not found in token" });
-    }
-
-    const walletInfo = await verifyParaWalletAddress(
-      embeddedWallet,
-      process.env.PARA_SECRET_KEY!
-    );
-    if (!walletInfo) {
-      return res
-        .status(403)
-        .json({ error: "Embedded wallet does not belong to this project" });
-    }
-    console.log(`Para wallet verified: ${JSON.stringify(walletInfo)}`);
-
-    const isNFTOwned = await validateNFTOwnership(
+  // Parallel validation (Bun handles this efficiently)
+  const [walletInfo, isNFTOwned, existingClaim] = await Promise.all([
+    verifyParaWalletAddress(embeddedWallet, process.env.PARA_SECRET_KEY!),
+    validateNFTOwnership(
       externalWallet,
       NFT_CONTRACT_ADDRESS as `0x${string}`,
       TOKEN_ID || "1"
-    );
-    if (!isNFTOwned) {
-      return res.status(403).json({
-        error: `NFT ownership validation failed for address ${externalWallet}`,
-      });
-    }
+    ),
+    queries.checkExistingClaim(externalWallet),
+  ]);
 
-    const ip = getClientIP(req);
-
-    const response = await axios.post(
-      `${QUICKNODE_API}/partners/distributors/claim`,
-      { address: embeddedWallet, ip, visitorId },
-      { headers: { "x-partner-api-key": DISTRIBUTOR_API_KEY } }
-    );
-
-    res.status(response.status).json(response.data);
-  } catch (error: any) {
-    res
-      .status(error.response?.status || 500)
-      .json(error.response?.data || { error: "Server error" });
+  // Validate results
+  if (!walletInfo) {
+    throw {
+      status: 403,
+      message: "Embedded wallet does not belong to this project",
+    };
   }
+
+  if (!isNFTOwned) {
+    throw {
+      status: 403,
+      message: `NFT ownership validation failed for address ${externalWallet}`,
+    };
+  }
+
+  if (existingClaim) {
+    throw {
+      status: 429,
+      message:
+        "This NFT owner has already claimed. Only one claim is allowed per NFT holder.",
+    };
+  }
+
+  // Get client IP
+  const cfConnectingIp =
+    request.headers.get("cf-connecting-ip") ||
+    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    "";
+
+  // Prepare QuickNode claim request
+  const claimRequest: QuickNodeClaimRequest = {
+    address: embeddedWallet,
+    ip: cfConnectingIp,
+    visitorId,
+  };
+
+  // Submit claim using the service and get transaction status
+  const { claimResponse, transactionStatus, finalTxHash } =
+    await quickNodeService.processClaimWithStatus(
+      claimRequest,
+      3000, // Poll every 3 seconds
+      10 // Max 10 attempts (30 seconds)
+    );
+
+  // Extract amount from response
+  const amount = claimResponse.data?.amount || 1;
+
+  // Save to database
+  await queries.insertClaim({
+    embeddedWallet,
+    externalWallet,
+    visitorId,
+    ip: cfConnectingIp,
+    txId: finalTxHash || claimResponse.transactionId || null,
+    amount,
+  });
+
+  // Return a clean response to the client
+  return {
+    success: true,
+    transactionId: claimResponse.transactionId,
+    txHash: finalTxHash,
+    amount,
+    status: transactionStatus?.status || "pending",
+    message: "Claim processed successfully",
+  };
+}
+
+const app = new Elysia()
+  .use(
+    cors({
+      origin: process.env.ALLOWED_ORIGINS?.split(","),
+    })
+  )
+  .post("/claim", async ({ request, set }) => {
+    try {
+      // Parse request body
+      const body = await request.json();
+      const { visitorId } = body as { visitorId: string };
+
+      if (!visitorId) {
+        set.status = 400;
+        return { error: "Missing visitorId (fingerprint)" };
+      }
+
+      // Extract and validate auth header
+      const authHeader = request.headers.get("authorization");
+      if (!authHeader?.startsWith("Bearer ")) {
+        set.status = 401;
+        return { error: "Missing or invalid Authorization header" };
+      }
+
+      const token = authHeader.replace(/^Bearer\s+/i, "");
+
+      // Process claim
+      const result = await processClaim(token, visitorId, request);
+
+      return result;
+    } catch (error: any) {
+      console.error("Claim processing error:", error);
+
+      set.status = error.status || 500;
+      return {
+        error: error.message || "Server error",
+        ...(error.details && { details: error.details }),
+      };
+    }
+  })
+  .get("/healthz", () => ({
+    status: "ok",
+    timestamp: new Date().toISOString(),
+    version: process.env.npm_package_version || "1.0.0",
+  }))
+  .get("/", () => ({
+    service: "QuickNode Faucet Distributor",
+    status: "running",
+  }));
+
+const port = Number(process.env.PORT || 8080);
+
+app.listen({
+  port,
+  hostname: "0.0.0.0", // Important for Docker
 });
 
-// Health check endpoint
-app.get("/healthz", (_, res) => res.status(200).json({ status: "ok" }));
-
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, () =>
-  console.log(`Partner API server running on port ${PORT}`)
-);
+console.log(`🚀 Partner API server running on port ${port}`);
+console.log(`🔗 Health check: http://localhost:${port}/healthz`);
