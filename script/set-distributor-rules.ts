@@ -1,11 +1,8 @@
-// script/set-distributor-rules.ts
-
 import axios from "axios";
-import type { DistributorRules, DistributorRuleKey } from "../src/rules.types";
+import type { DistributorRules, DistributorRuleKey } from "../src/types";
 
-const PARTNER_API_KEY = process.env.PARTNER_API_KEY!;
-const API_URL =
-  process.env.FAUCET_API_URL || "https://api.faucet.quicknode.com";
+const PARTNER_API_KEY = Bun.env.PARTNER_API_KEY!;
+const API_URL = Bun.env.FAUCET_API_URL || "https://api.faucet.quicknode.com";
 const distributorId = process.argv[2];
 
 if (!distributorId) {
@@ -17,9 +14,9 @@ if (!distributorId) {
 
 // --- Set rules here (for convenience, you can move this to a separate config) ---
 const RULES: DistributorRules = {
-  DRIP_PER_INTERVAL: 1,
-  DRIP_INTERVAL: "TWELVE_HOURS",
-  DEFAULT_DRIP_AMOUNT: 0.1,
+  DRIP_PER_INTERVAL: 10,
+  DRIP_INTERVAL: "THIRTY_MINUTES",
+  DEFAULT_DRIP_AMOUNT: 0.2,
   // If you want to remove a rule, simply omit it here
 };
 

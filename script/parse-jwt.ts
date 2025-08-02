@@ -1,4 +1,4 @@
-import { validateParaJwt } from "../src/jwt.ts";
+import { validateParaJwt } from "../src/lib/jwt.ts";
 
 const [token] = process.argv.slice(2);
 
