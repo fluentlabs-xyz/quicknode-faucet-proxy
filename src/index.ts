@@ -1,172 +1,152 @@
-import { Elysia } from "elysia";
-import { cors } from "@elysiajs/cors";
-import { queries, ensureClaimsTable } from "./db";
-import { NFT_CONTRACT_ADDRESS, TOKEN_ID } from "./config";
-import { validateNFTOwnership, verifyParaWalletAddress } from "./validate";
-import { validateParaJwt } from "./jwt";
-import { quickNodeService, type QuickNodeClaimRequest } from "./quicknode";
+import { processClaim } from "./claim";
+import { ensureClaimsTable, queries } from "./db/queries";
+import { config } from "./config";
+import { AppError } from "./errors";
+import type { ClaimRequest } from "./types";
 
-// Create tables at startup
+// Initialize database
 await ensureClaimsTable();
 
-// Bun-optimized claim processing function
-async function processClaim(
-  token: string,
-  visitorId: string,
-  request: Request
-): Promise<any> {
-  // Validate JWT first (fast fail)
-  const jwtResult = await validateParaJwt(token);
-  if (!jwtResult.valid) {
-    throw { status: 401, message: "Invalid token", details: jwtResult.error };
+// CORS headers as Record<string, string>
+const corsHeaders: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*", // Will be checked per request
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+};
+
+function getCorsHeaders(origin: string | null): Record<string, string> {
+  if (!origin || config.allowedOrigins.includes("*")) {
+    return corsHeaders;
   }
 
-  // Extract wallets
-  const { wallets, externalWallets } = jwtResult.payload.data || {};
-  const embeddedWallet = wallets?.find((w: any) => w.type === "EVM")?.address;
-  const externalWallet = externalWallets?.find(
-    (w: any) => w.type === "EVM"
-  )?.address;
-
-  if (!embeddedWallet || !externalWallet) {
-    throw { status: 400, message: "Wallets not found in token" };
-  }
-
-  // Parallel validation (Bun handles this efficiently)
-  const [walletInfo, isNFTOwned, existingClaim] = await Promise.all([
-    verifyParaWalletAddress(embeddedWallet, process.env.PARA_SECRET_KEY!),
-    validateNFTOwnership(
-      externalWallet,
-      NFT_CONTRACT_ADDRESS as `0x${string}`,
-      TOKEN_ID || "1"
-    ),
-    queries.checkExistingClaim(externalWallet),
-  ]);
-
-  // Validate results
-  if (!walletInfo) {
-    throw {
-      status: 403,
-      message: "Embedded wallet does not belong to this project",
+  if (config.allowedOrigins.includes(origin)) {
+    return {
+      ...corsHeaders,
+      "Access-Control-Allow-Origin": origin,
     };
   }
 
-  if (!isNFTOwned) {
-    throw {
-      status: 403,
-      message: `NFT ownership validation failed for address ${externalWallet}`,
-    };
-  }
-
-  if (existingClaim) {
-    throw {
-      status: 429,
-      message:
-        "This NFT owner has already claimed. Only one claim is allowed per NFT holder.",
-    };
-  }
-
-  // Get client IP
-  const cfConnectingIp =
-    request.headers.get("cf-connecting-ip") ||
-    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-    "";
-
-  // Prepare QuickNode claim request
-  const claimRequest: QuickNodeClaimRequest = {
-    address: embeddedWallet,
-    ip: cfConnectingIp,
-    visitorId,
-  };
-
-  // Submit claim using the service and get transaction status
-  const { claimResponse, transactionStatus, finalTxHash } =
-    await quickNodeService.processClaimWithStatus(
-      claimRequest,
-      3000, // Poll every 3 seconds
-      10 // Max 10 attempts (30 seconds)
-    );
-
-  // Extract amount from response
-  const amount = claimResponse.data?.amount || 1;
-
-  // Save to database
-  await queries.insertClaim({
-    embeddedWallet,
-    externalWallet,
-    visitorId,
-    ip: cfConnectingIp,
-    txId: finalTxHash || claimResponse.transactionId || null,
-    amount,
-  });
-
-  // Return a clean response to the client
-  return {
-    success: true,
-    transactionId: claimResponse.transactionId,
-    txHash: finalTxHash,
-    amount,
-    status: transactionStatus?.status || "pending",
-    message: "Claim processed successfully",
-  };
+  return {};
 }
 
-const app = new Elysia()
-  .use(
-    cors({
-      origin: process.env.ALLOWED_ORIGINS?.split(","),
-    })
-  )
-  .post("/claim", async ({ request, set }) => {
-    try {
-      // Parse request body
-      const body = await request.json();
-      const { visitorId } = body as { visitorId: string };
+// Start server
+Bun.serve({
+  port: config.port,
+  async fetch(req) {
+    const url = new URL(req.url);
+    const origin = req.headers.get("origin");
+    const corsResponseHeaders = getCorsHeaders(origin);
 
-      if (!visitorId) {
-        set.status = 400;
-        return { error: "Missing visitorId (fingerprint)" };
-      }
-
-      // Extract and validate auth header
-      const authHeader = request.headers.get("authorization");
-      if (!authHeader?.startsWith("Bearer ")) {
-        set.status = 401;
-        return { error: "Missing or invalid Authorization header" };
-      }
-
-      const token = authHeader.replace(/^Bearer\s+/i, "");
-
-      // Process claim
-      const result = await processClaim(token, visitorId, request);
-
-      return result;
-    } catch (error: any) {
-      console.error("Claim processing error:", error);
-
-      set.status = error.status || 500;
-      return {
-        error: error.message || "Server error",
-        ...(error.details && { details: error.details }),
-      };
+    // Handle CORS preflight
+    if (req.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: corsResponseHeaders });
     }
-  })
-  .get("/healthz", () => ({
-    status: "ok",
-    timestamp: new Date().toISOString(),
-    version: process.env.npm_package_version || "1.0.0",
-  }))
-  .get("/", () => ({
-    service: "QuickNode Faucet Distributor",
-    status: "running",
-  }));
 
-const port = Number(process.env.PORT || 8080);
+    try {
+      // Health check
+      if (url.pathname === "/healthz" && req.method === "GET") {
+        return Response.json(
+          {
+            status: "ok",
+            timestamp: new Date().toISOString(),
+            version: "1.0.0",
+          },
+          { headers: corsResponseHeaders }
+        );
+      }
 
-app.listen({
-  port,
-  hostname: "0.0.0.0", // Important for Docker
+      // Claim endpoint
+      if (url.pathname === "/claim" && req.method === "POST") {
+        // Parse request
+        const body = (await req.json()) as { visitorId: string };
+
+        if (!body.visitorId) {
+          return Response.json(
+            { error: "Missing visitorId" },
+            { status: 400, headers: corsResponseHeaders }
+          );
+        }
+
+        // Extract token
+        const authHeader = req.headers.get("authorization");
+        if (!authHeader?.startsWith("Bearer ")) {
+          return Response.json(
+            { error: "Missing or invalid Authorization header" },
+            { status: 401, headers: corsResponseHeaders }
+          );
+        }
+
+        const token = authHeader.slice(7); // Remove "Bearer "
+
+        // Get client IP
+        const clientIp =
+          req.headers.get("cf-connecting-ip") ||
+          req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+          req.headers.get("x-real-ip") ||
+          "";
+
+        // Process claim
+        const request: ClaimRequest = {
+          token,
+          visitorId: body.visitorId,
+          clientIp,
+        };
+
+        const result = await processClaim(request);
+
+        return Response.json(result, {
+          status: 200,
+          headers: corsResponseHeaders,
+        });
+      }
+
+      // Admin stats endpoint (optional)
+      if (url.pathname === "/admin/stats" && req.method === "GET") {
+        const stats = await queries.getClaimStats();
+        return Response.json(stats, { headers: corsResponseHeaders });
+      }
+
+      // Default route
+      if (url.pathname === "/" && req.method === "GET") {
+        return Response.json(
+          {
+            service: "QuickNode Faucet Distributor",
+            status: "running",
+            endpoints: ["/claim", "/healthz"],
+          },
+          { headers: corsResponseHeaders }
+        );
+      }
+
+      // 404
+      return Response.json(
+        { error: "Not found" },
+        { status: 404, headers: corsResponseHeaders }
+      );
+    } catch (error) {
+      if (error instanceof AppError) {
+        console.log(
+          `[${error.constructor.name}] ${error.statusCode}: ${error.message}`
+        );
+
+        return Response.json(
+          {
+            error: error.message,
+            ...(error.details && { details: error.details }),
+          },
+          { status: error.statusCode, headers: corsResponseHeaders }
+        );
+      }
+      console.error("Unexpected error:", error);
+      return Response.json(
+        { error: "Internal server error" },
+        { status: 500, headers: corsResponseHeaders }
+      );
+    }
+  },
 });
 
-console.log(`🚀 Partner API server running on port ${port}`);
-console.log(`🔗 Health check: http://localhost:${port}/healthz`);
+console.log(`🚀 Faucet API running on http://localhost:${config.port}`);
+console.log(
+  `📊 Stats available at http://localhost:${config.port}/admin/stats`
+);
