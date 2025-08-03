@@ -19,7 +19,7 @@ export const config = {
   tokenId: Bun.env.TOKEN_ID!,
 
   // Para
-  paraSecretKey: Bun.env.PARA_SECRET_KEY!,
+  paraSecretKey: Bun.env.PARA_SECRET_KEY || null,
   paraJwksUrl: Bun.env.PARA_JWKS_URL!,
   paraVerifyUrl: Bun.env.PARA_VERIFY_URL!,
 } as const;
@@ -28,7 +28,6 @@ export const config = {
 const requiredKeys = [
   "distributorApiKey",
   "nftContractAddress",
-  "paraSecretKey",
   "paraJwksUrl",
   "paraVerifyUrl",
   "rpcUrl",

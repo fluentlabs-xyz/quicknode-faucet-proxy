@@ -33,11 +33,13 @@ export async function processClaim(
 
   // 3. Run validations in parallel
   const [walletInfo, isNFTOwned, existingClaim] = await Promise.all([
-    verifyParaWalletAddress(
-      embeddedWallet,
-      config.paraSecretKey,
-      config.paraVerifyUrl
-    ),
+    config.paraSecretKey
+      ? verifyParaWalletAddress(
+          embeddedWallet,
+          config.paraSecretKey,
+          config.paraVerifyUrl
+        )
+      : Promise.resolve(true),
     validateNFTOwnership(
       externalWallet,
       config.nftContractAddress,
@@ -47,7 +49,7 @@ export async function processClaim(
   ]);
 
   // 4. Check validation results
-  if (!walletInfo) {
+  if (config.paraSecretKey && !walletInfo) {
     throw new ForbiddenError("Embedded wallet does not belong to this project");
   }
 
