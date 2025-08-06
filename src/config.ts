@@ -1,60 +1,52 @@
-export const config = {
-  // Server
-  port: Number(Bun.env.PORT || 8080),
-  allowedOrigins: Bun.env.ALLOWED_ORIGINS?.split(",") || [
-    "http://localhost:3000",
-  ],
+import { Distributor } from "./distributor";
+import type { GlobalConfig, IValidator } from "./types";
+import { logger } from "./logger";
+import { validators } from "./validators";
 
-  // Database
-  databaseUrl: Bun.env.DATABASE_URL!,
+export async function loadDistributors(): Promise<Map<string, Distributor>> {
+  const distributors = new Map<string, Distributor>();
 
-  // QuickNode
-  quicknodeApi: Bun.env.QUICKNODE_API || "https://api.faucet.quicknode.com",
-  distributorApiKey: Bun.env.DISTRIBUTOR_API_KEY!,
-  distributorId: Bun.env.DISTRIBUTOR_ID!,
+  const configFile = await Bun.file("./config/distributors.json").text();
+  const config: GlobalConfig = JSON.parse(
+    configFile.replace(/\$\{([^}]+)\}/g, (_, key) => Bun.env[key] || "")
+  );
 
-  // Blockchain
-  rpcUrl: Bun.env.RPC_URL,
-  nftContractAddress: Bun.env.NFT_CONTRACT_ADDRESS!,
-  tokenId: Bun.env.TOKEN_ID!,
+  for (const [name, distConfig] of Object.entries(config.distributors)) {
+    const validators = createValidators(distConfig.validators);
 
-  // Para
-  paraSecretKey: Bun.env.PARA_SECRET_KEY || null,
-  paraJwksUrl: Bun.env.PARA_JWKS_URL!,
-  paraVerifyUrl: Bun.env.PARA_VERIFY_URL!,
-} as const;
+    const distributor = new Distributor({
+      id: name,
+      name,
+      path: distConfig.path,
+      distributorId: distConfig.distributor_id,
+      distributorApiKey: distConfig.distributor_api_key,
+      dripAmount: distConfig.drip_amount,
+      validators,
+    });
 
-// Validate required config
-const requiredKeys = [
-  "distributorApiKey",
-  "nftContractAddress",
-  "paraJwksUrl",
-  "paraVerifyUrl",
-  "rpcUrl",
-  "tokenId",
-  "databaseUrl",
-  "distributorId",
-] as const;
-
-for (const key of requiredKeys) {
-  if (!config[key]) {
-    throw new Error(
-      `Missing required environment variable: ${key.toUpperCase()}`
-    );
+    distributors.set(distConfig.path, distributor);
   }
+
+  logger.info("Distributors initialized", {
+    component: "config",
+    count: distributors.size,
+    paths: Array.from(distributors.keys()),
+  });
+
+  return distributors;
 }
 
-export type DistributorRuleKey =
-  | "TOTAL_DRIP_PER_INTERVAL"
-  | "TOTAL_DRIP_INTERVAL"
-  | "DRIP_PER_INTERVAL"
-  | "DRIP_INTERVAL" // ONE_DAY, TWELVE_HOURS, ONE_HOUR, THIRTY_MINUTES
-  | "MAINNET_BALANCE"
-  | "MAINNET_TRANSACTION_COUNT"
-  | "DEFAULT_DRIP_AMOUNT";
-
-export type DistributorRuleValue = string | number;
-
-export type DistributorRules = Partial<
-  Record<DistributorRuleKey, DistributorRuleValue>
->;
+function createValidators(
+  validatorConfigs: Record<string, Record<string, unknown>>
+): IValidator[] {
+  return Object.entries(validatorConfigs)
+    .map(([name, config]) => {
+      const ValidatorClass = validators[name as keyof typeof validators];
+      if (!ValidatorClass) {
+        logger.warn(`Unknown validator: ${name}`, { component: "config" });
+        return null;
+      }
+      return new ValidatorClass(config);
+    })
+    .filter(Boolean) as IValidator[];
+}

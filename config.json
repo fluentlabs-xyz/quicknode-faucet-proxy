@@ -1,0 +1,39 @@
+{
+  "partner_api_key": "${PARTNER_API_KEY}",
+  "quicknode_api_url": "${QUICKNODE_API_URL}",
+
+  "distributors": {
+    "pump-pals-prefund": {
+      "distributor_id": "c45010cb-5452-4008-8e11-cb7365448a5c",
+      "distributor_api_key": "${MAIN_DISTRIBUTOR_API_KEY}",
+      "path": "/pump-pals-prefund/claim",
+      "drip_amount": 0.22,
+      "drip_interval": "ONE_DAY",
+      "drip_per_interval": 1,
+
+      "validators": {
+        "para-account": {
+          "jwks_url": "https://api.para.gg/jwks",
+          "verify_url": "https://api.para.gg/verify",
+          "secret_key": "${PARA_SECRET_KEY}"
+        },
+        "once-only": {}
+      }
+    },
+
+    "test": {
+      "distributor_id": "d5601cba-6543-5009-9f22-dc8476559b6d",
+      "distributor_api_key": "${TEST_DISTRIBUTOR_API_KEY}",
+      "path": "/test-claim",
+      "drip_amount": 0.1,
+      "drip_interval": "FIVE_MINUTES",
+      "drip_per_interval": 100,
+
+      "validators": {
+        "time-limit": {
+          "cooldown_hours": 1
+        }
+      }
+    }
+  }
+}

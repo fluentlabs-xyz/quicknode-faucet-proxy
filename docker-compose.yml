@@ -19,14 +19,14 @@ services:
       timeout: 5s
       retries: 5
 
-  backend:
-    build: .
-    restart: always
-    depends_on:
-      postgres:
-        condition: service_healthy
-    ports:
-      - "8080:8080"
-    env_file: .env
+  # backend:
+  #   build: .
+  #   restart: always
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #   ports:
+  #     - "8080:8080"
+  #   env_file: .env
 volumes:
   pg_data:
