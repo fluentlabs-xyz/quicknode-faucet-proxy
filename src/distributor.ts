@@ -6,7 +6,7 @@ import type {
 } from "./types";
 import { quickNodeService } from "./quicknode";
 import { queries } from "./database";
-import { logger } from "./logger";
+import { log } from "./logger";
 
 export interface DistributorOptions {
   id: string;
@@ -24,11 +24,10 @@ export class Distributor {
       throw new Error(`No validators for distributor ${options.name}`);
     }
 
-    logger.info("Distributor initialized", {
-      component: "distributor",
+    log.info("Distributor initialized", "distributor", undefined, {
       id: options.id,
       path: options.path,
-      validatorCount: options.validators.length,
+      validators: options.validators.length,
     });
   }
 
@@ -66,11 +65,12 @@ export class Distributor {
     };
   }
 
-  async processClaim(request: ClaimRequest): Promise<ClaimResult> {
+  async processClaim(request: ClaimRequest, requestId?: string): Promise<ClaimResult> {
     try {
       let validationData: Record<string, unknown> = {};
 
       for (const validator of this.options.validators) {
+        console.log("validator", validator.name);
         const result = await validator.validate(request);
         if (!result.success) {
           throw new Error(result.error || "Validation failed");
@@ -96,7 +96,8 @@ export class Distributor {
           address: walletAddress as string,
           ip: request.clientIp,
           visitorId: request.visitorId,
-        }
+        },
+        requestId
       );
 
       if (!response.success) {
@@ -124,11 +125,7 @@ export class Distributor {
         message: "Claim processed successfully",
       };
     } catch (error) {
-      logger.error("Claim failed", {
-        error: error instanceof Error ? error.message : String(error),
-        distributorId: this.options.id,
-        visitorId: request.visitorId,
-      });
+      log.error("Claim failed", "distributor", error, requestId);
       throw error;
     }
   }

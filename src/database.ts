@@ -1,6 +1,6 @@
 // src/database.ts - Ultra KISS version
 import postgres from "postgres";
-import { logger } from "./logger";
+import { log } from "./logger";
 
 // Simple database connection
 const sql = postgres(
@@ -36,9 +36,9 @@ export async function ensureDatabase(): Promise<void> {
     await sql`CREATE INDEX IF NOT EXISTS idx_claims_wallet ON claims(external_wallet, distributor_id)`;
     await sql`CREATE INDEX IF NOT EXISTS idx_claims_created ON claims(created_at)`;
 
-    logger.info("Database ready");
+    log.info("Database ready", "database");
   } catch (error) {
-    logger.error("Database setup failed", error);
+    log.error("Database setup failed", "database", error);
     throw error;
   }
 }

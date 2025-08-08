@@ -1,6 +1,6 @@
 import { Distributor } from "./distributor";
 import type { GlobalConfig, IValidator } from "./types";
-import { logger } from "./logger";
+import { log } from "./logger";
 import { validators } from "./validators";
 
 export async function loadDistributors(): Promise<Map<string, Distributor>> {
@@ -28,10 +28,8 @@ export async function loadDistributors(): Promise<Map<string, Distributor>> {
     distributors.set(distConfig.path, distributor);
   }
 
-  logger.info("Distributors initialized", {
-    component: "config",
+  log.info("Distributors initialized", "config", undefined, {
     count: distributors.size,
-    paths: Array.from(distributors.keys()),
   });
 
   return distributors;
@@ -45,7 +43,7 @@ function createValidators(
     .map(([name, config]) => {
       const ValidatorClass = validators[name as keyof typeof validators];
       if (!ValidatorClass) {
-        logger.warn(`Unknown validator: ${name}`, { component: "config" });
+        log.warn(`Unknown validator: ${name}`, "config");
         return null;
       }
       return new ValidatorClass({ ...distributorContext, ...config });

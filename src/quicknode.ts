@@ -1,4 +1,4 @@
-import { logger, logError } from "./logger";
+import { log } from "./logger";
 import type { DistributorRules, DripInterval } from "./types";
 
 export interface QuickNodeClaimRequest {
@@ -41,13 +41,12 @@ class QuickNodeService {
    */
   async submitClaim(
     distributorApiKey: string,
-    request: QuickNodeClaimRequest
+    request: QuickNodeClaimRequest,
+    requestId?: string
   ): Promise<QuickNodeClaimResponse> {
-    logger.info("Submitting claim to QuickNode", {
-      component: "quicknode",
-      address: request.address,
-      visitorId: request.visitorId,
-    });
+    if (requestId) {
+      log.info("Submitting claim", "quicknode", requestId, { address: request.address });
+    }
 
     try {
       const response = await fetch(
@@ -71,10 +70,9 @@ class QuickNodeService {
 
       const data = JSON.parse(responseText);
 
-      logger.info("Claim submitted successfully", {
-        component: "quicknode",
-        transactionId: data.transactionId,
-      });
+      if (requestId) {
+        log.info("Claim submitted", "quicknode", requestId, { txId: data.transactionId });
+      }
 
       return {
         transactionId: data.transactionId,
@@ -82,7 +80,7 @@ class QuickNodeService {
         message: "Claim processed successfully",
       };
     } catch (error) {
-      logError("QuickNode claim submission failed", error, "quicknode");
+      log.error("Claim submission failed", "quicknode", error, requestId);
       throw error;
     }
   }
@@ -91,10 +89,7 @@ class QuickNodeService {
    * Get distributor rules from QuickNode
    */
   async getDistributorRules(distributorId: string): Promise<DistributorRules> {
-    logger.info("Fetching distributor rules", {
-      component: "quicknode",
-      distributorId,
-    });
+    // Suppress routine rule fetching logs
 
     try {
       const response = await fetch(
@@ -132,17 +127,11 @@ class QuickNodeService {
         }
       }
 
-      logger.info("Distributor rules fetched", {
-        component: "quicknode",
-        distributorId,
-        rules,
-      });
+      // Rules fetched - suppressed for noise reduction
 
       return rules;
     } catch (error) {
-      logError("Failed to fetch distributor rules", error, "quicknode", {
-        distributorId,
-      });
+      log.error("Failed to fetch rules", "quicknode", error);
       throw error;
     }
   }
@@ -155,11 +144,7 @@ class QuickNodeService {
     distributorId: string,
     rules: DistributorRules
   ): Promise<void> {
-    logger.info("Updating distributor rules", {
-      component: "quicknode",
-      distributorId,
-      rules,
-    });
+    // Suppress routine rule update logs
 
     try {
       // QuickNode API creates or updates based on key
@@ -182,19 +167,11 @@ class QuickNodeService {
           throw new Error(`Failed to update rule ${key}: ${response.status}`);
         }
 
-        logger.info("Rule updated", {
-          component: "quicknode",
-          distributorId,
-          rule: key,
-          value,
-        });
+        // Rule updated - suppressed for noise reduction
         await new Promise(resolve => setTimeout(resolve, 300));
       }
     } catch (error) {
-      logError("Failed to update distributor rules", error, "quicknode", {
-        distributorId,
-        rules,
-      });
+      log.error("Failed to update rules", "quicknode", error);
       throw error;
     }
   }

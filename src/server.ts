@@ -1,5 +1,5 @@
 // src/server.ts - Production-ready with path-based routing
-import { logger } from "./logger";
+import { log, generateRequestId } from "./logger";
 import type { Distributor } from "./distributor";
 
 export function createServer(distributors: Map<string, Distributor>) {
@@ -13,6 +13,7 @@ export function createServer(distributors: Map<string, Distributor>) {
     async fetch(req) {
       const url = new URL(req.url);
       const pathname = url.pathname;
+      const requestId = generateRequestId();
 
       try {
         if (pathname === "/healthz") {
@@ -35,9 +36,7 @@ export function createServer(distributors: Map<string, Distributor>) {
         const distributor = distributors.get(pathname);
 
         if (!distributor) {
-          logger.warn(`Unknown endpoint: ${pathname}`, {
-            available: Array.from(distributors.keys()),
-          });
+          log.warn(`Unknown endpoint: ${pathname}`, "server", requestId);
           return Response.json(
             {
               error: "Endpoint not found",
@@ -71,20 +70,16 @@ export function createServer(distributors: Map<string, Distributor>) {
           body,
           req.headers
         );
-        const result = await distributor.processClaim(claimRequest);
+        const result = await distributor.processClaim(claimRequest, requestId);
 
-        logger.info("Claim processed", {
+        log.info("Claim processed", "server", requestId, {
           distributor: distributor.name,
-          path: pathname,
           success: result.success,
         });
 
         return Response.json(result);
       } catch (error) {
-        logger.error("Request failed", {
-          error: error instanceof Error ? error.message : String(error),
-          path: pathname,
-        });
+        log.error("Request failed", "server", error, requestId);
 
         if (error instanceof Error && error.message.includes("Validation")) {
           return Response.json(
@@ -105,13 +100,8 @@ export function createServer(distributors: Map<string, Distributor>) {
     },
 
     error(error) {
-      logger.error("Server error", { error: String(error) });
-      return Response.json(
-        {
-          error: "Server error",
-        },
-        { status: 500 }
-      );
+      log.error("Server error", "server", error);
+      return Response.json({ error: "Server error" }, { status: 500 });
     },
   });
 
@@ -122,6 +112,7 @@ export function createServer(distributors: Map<string, Distributor>) {
     async fetch(req) {
       const url = new URL(req.url);
       const pathname = url.pathname;
+      const requestId = generateRequestId();
 
       try {
         if (pathname === "/admin/distributors") {
@@ -171,10 +162,7 @@ export function createServer(distributors: Map<string, Distributor>) {
           { status: 404 }
         );
       } catch (error) {
-        logger.error("Admin request failed", {
-          error: error instanceof Error ? error.message : String(error),
-          path: pathname,
-        });
+        log.error("Admin request failed", "admin", error, requestId);
 
         return Response.json(
           {
@@ -187,14 +175,13 @@ export function createServer(distributors: Map<string, Distributor>) {
     },
   });
 
-  logger.info("🚀 Servers started", {
-    public: `http://0.0.0.0:${publicServer.port}`,
-    admin: `http://127.0.0.1:${adminServer.port}`,
-    distributors: Array.from(distributors.entries()).map(([path, d]) => ({
-      path,
-      name: d.name,
-    })),
+  // Startup logging
+  const routes = Array.from(distributors.keys()).join(", ");
+  log.info("🚀 Servers started", "startup", undefined, { 
+    public: publicServer.port, 
+    admin: adminServer.port 
   });
+  log.info(`Routes: ${routes}`, "startup");
 
   return publicServer;
 }

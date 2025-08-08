@@ -10,7 +10,7 @@ if (!jwt || !visitorId) {
   process.exit(1);
 }
 
-const CLAIM_URL = "https://eco-faucet-api.fluent.xyz/claim";
+const CLAIM_URL = "http://localhost:8080/test-claim";
 
 // Generate a random IP if not provided (for testing only!)
 const clientIp =
