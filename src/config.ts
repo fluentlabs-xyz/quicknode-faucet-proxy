@@ -6,13 +6,14 @@ import { validators } from "./validators";
 export async function loadDistributors(): Promise<Map<string, Distributor>> {
   const distributors = new Map<string, Distributor>();
 
-  const configFile = await Bun.file("./config/distributors.json").text();
+  const configFile = await Bun.file("./config.json").text();
   const config: GlobalConfig = JSON.parse(
     configFile.replace(/\$\{([^}]+)\}/g, (_, key) => Bun.env[key] || "")
   );
 
   for (const [name, distConfig] of Object.entries(config.distributors)) {
-    const validators = createValidators(distConfig.validators);
+    const { validators: validatorConfigs, ...distributorContext } = distConfig;
+    const validators = createValidators(validatorConfigs, distributorContext);
 
     const distributor = new Distributor({
       id: name,
@@ -37,7 +38,8 @@ export async function loadDistributors(): Promise<Map<string, Distributor>> {
 }
 
 function createValidators(
-  validatorConfigs: Record<string, Record<string, unknown>>
+  validatorConfigs: Record<string, Record<string, unknown>>,
+  distributorContext: Record<string, unknown> = {}
 ): IValidator[] {
   return Object.entries(validatorConfigs)
     .map(([name, config]) => {
@@ -46,7 +48,7 @@ function createValidators(
         logger.warn(`Unknown validator: ${name}`, { component: "config" });
         return null;
       }
-      return new ValidatorClass(config);
+      return new ValidatorClass({ ...distributorContext, ...config });
     })
     .filter(Boolean) as IValidator[];
 }

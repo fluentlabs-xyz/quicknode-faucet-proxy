@@ -110,7 +110,9 @@ class QuickNodeService {
         throw new Error(`Failed to fetch rules: ${response.status}`);
       }
 
-      const data = (await response.json()) as { rules: QuickNodeRuleResponse[] };
+      const data = (await response.json()) as {
+        rules: QuickNodeRuleResponse[];
+      };
 
       // Convert to simple object with proper type handling
       const rules: DistributorRules = {};
@@ -186,6 +188,7 @@ class QuickNodeService {
           rule: key,
           value,
         });
+        await new Promise(resolve => setTimeout(resolve, 300));
       }
     } catch (error) {
       logError("Failed to update distributor rules", error, "quicknode", {
