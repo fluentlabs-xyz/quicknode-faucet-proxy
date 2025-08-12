@@ -1,10 +1,8 @@
-// src/server.ts - Production-ready with path-based routing
-import { log, generateRequestId } from "./logger";
+import { log, generateRequestId, logRequest } from "./logger";
 import type { Distributor } from "./distributor";
 
 export function createServer(distributors: Map<string, Distributor>) {
   const port = Number(process.env.PORT) || 8080;
-  const adminPort = Number(process.env.ADMIN_PORT) || 8081;
 
   const publicServer = Bun.serve({
     port,
@@ -14,6 +12,13 @@ export function createServer(distributors: Map<string, Distributor>) {
       const url = new URL(req.url);
       const pathname = url.pathname;
       const requestId = generateRequestId();
+
+      // Extract IP early for logging
+      const ip =
+        req.headers.get("cf-connecting-ip") ||
+        req.headers.get("x-forwarded-for") ||
+        req.headers.get("x-real-ip") ||
+        "unknown";
 
       try {
         if (pathname === "/healthz") {
@@ -70,28 +75,77 @@ export function createServer(distributors: Map<string, Distributor>) {
           body,
           req.headers
         );
+
+        // Log comprehensive request data after parsing
+        logRequest(
+          requestId,
+          req.method,
+          pathname,
+          ip,
+          claimRequest.walletAddress as string,
+          claimRequest.visitorId,
+          distributor.name,
+          claimRequest.token
+        );
+
         const result = await distributor.processClaim(claimRequest, requestId);
 
-        log.info("Claim processed", "server", requestId, {
-          distributor: distributor.name,
-          success: result.success,
-        });
+        // IMPORTANT: Check if claim was successful and return appropriate status
+        if (!result.success) {
+          // Determine appropriate status code based on error
+          let statusCode = 400; // Default to bad request
 
+          if (result.error?.includes("token")) {
+            // Token-related errors are authentication issues
+            statusCode = 401;
+          } else if (
+            result.error?.includes("already claimed") ||
+            result.error?.includes("cooldown") ||
+            result.error?.includes("limit")
+          ) {
+            // Rate limiting or duplicate claims
+            statusCode = 429;
+          } else if (
+            result.error?.includes("wallet") ||
+            result.error?.includes("address")
+          ) {
+            // Missing or invalid data
+            statusCode = 400;
+          } else if (
+            result.error?.includes("unavailable") ||
+            result.error?.includes("faucet")
+          ) {
+            // Service temporarily unavailable
+            statusCode = 503;
+          }
+
+          return Response.json(result, { status: statusCode });
+        }
+
+        // Success - return 200
         return Response.json(result);
       } catch (error) {
         log.error("Request failed", "server", error, requestId);
 
-        if (error instanceof Error && error.message.includes("Validation")) {
-          return Response.json(
-            {
-              error: error.message,
-            },
-            { status: 400 }
-          );
+        // Handle different error types
+        if (error instanceof Error) {
+          if (
+            error.message.includes("Missing") ||
+            error.message.includes("Invalid")
+          ) {
+            return Response.json(
+              {
+                success: false,
+                error: error.message,
+              },
+              { status: 400 }
+            );
+          }
         }
 
         return Response.json(
           {
+            success: false,
             error: "Internal server error",
           },
           { status: 500 }
@@ -101,85 +155,20 @@ export function createServer(distributors: Map<string, Distributor>) {
 
     error(error) {
       log.error("Server error", "server", error);
-      return Response.json({ error: "Server error" }, { status: 500 });
-    },
-  });
-
-  const adminServer = Bun.serve({
-    port: adminPort,
-    hostname: "127.0.0.1",
-
-    async fetch(req) {
-      const url = new URL(req.url);
-      const pathname = url.pathname;
-      const requestId = generateRequestId();
-
-      try {
-        if (pathname === "/admin/distributors") {
-          const list = Array.from(distributors.values()).map((d) => ({
-            id: d.id,
-            name: d.name,
-            path: d.path,
-          }));
-          return Response.json({ distributors: list });
-        }
-
-        if (pathname === "/admin/health") {
-          const health = await Promise.all(
-            Array.from(distributors.values()).map(async (d) => ({
-              id: d.id,
-              name: d.name,
-              path: d.path,
-              ...(await d.healthCheck()),
-            }))
-          );
-          return Response.json({ health });
-        }
-
-        if (pathname === "/admin/stats") {
-          return Response.json({
-            uptime: process.uptime(),
-            memory: process.memoryUsage(),
-            distributors: distributors.size,
-            env: process.env.NODE_ENV || "development",
-          });
-        }
-
-        if (pathname === "/admin" || pathname === "/admin/") {
-          return Response.json({
-            endpoints: [
-              "/admin/distributors - List all distributors",
-              "/admin/health - Health check all distributors",
-              "/admin/stats - Server statistics",
-            ],
-          });
-        }
-
-        return Response.json(
-          {
-            error: "Admin endpoint not found",
-          },
-          { status: 404 }
-        );
-      } catch (error) {
-        log.error("Admin request failed", "admin", error, requestId);
-
-        return Response.json(
-          {
-            error: "Admin server error",
-            message: error instanceof Error ? error.message : "Unknown error",
-          },
-          { status: 500 }
-        );
-      }
+      return Response.json(
+        {
+          success: false,
+          error: "Server error",
+        },
+        { status: 500 }
+      );
     },
   });
 
   // Startup logging
   const routes = Array.from(distributors.keys()).join(", ");
-  log.info("🚀 Servers started", "startup", undefined, { 
-    public: publicServer.port, 
-    admin: adminServer.port 
+  log.info("🚀 Servers started", "startup", undefined, {
+    public: publicServer.port,
   });
   log.info(`Routes: ${routes}`, "startup");
 

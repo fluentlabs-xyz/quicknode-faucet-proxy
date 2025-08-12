@@ -1,44 +1,114 @@
-import type {
-  HealthStatus,
-  IValidator,
-  ClaimRequest,
-  ClaimResult,
-} from "./types";
+import type { HealthStatus, ClaimRequest, ClaimResult } from "./types";
 import { quickNodeService } from "./quicknode";
 import { queries } from "./database";
 import { log } from "./logger";
+import { validateParaJwt } from "./utils/jwtValidator";
+import { createPublicClient, http, parseAbi } from "viem";
+import z from "zod";
 
 export interface DistributorOptions {
-  id: string;
-  name: string;
   path: string;
+  name: string;
   distributorId: string;
   distributorApiKey: string;
   dripAmount: number;
-  validators: IValidator[];
+  validatorConfigs?: Record<string, Record<string, unknown>>;
 }
 
+const ERC1155_ABI = parseAbi([
+  "function balanceOf(address account, uint256 id) view returns (uint256)",
+]);
+
+const ParaConfigSchema = z.object({
+  paraJwksUrl: z.url("Para JWKS URL must be a valid URL"),
+  paraVerifyUrl: z.url("Para Verify URL must be a valid URL"),
+  paraSecretKey: z.string().min(1, "Para Secret Key is required"),
+});
+
+const NFTConfigSchema = z.object({
+  contractAddress: z
+    .string()
+    .regex(
+      /^0x[a-fA-F0-9]{40}$/,
+      "Contract address must be a valid Ethereum address"
+    ),
+  tokenId: z.string().min(1, "Token ID is required"),
+  rpcUrl: z.url("RPC URL must be a valid URL"),
+});
+
 export class Distributor {
+  // Para config - MANDATORY for security
+  private paraConfig?: {
+    paraJwksUrl: string;
+    paraVerifyUrl: string;
+    paraSecretKey: string;
+  };
+
+  // Optional validator configs
+  private onceOnlyEnabled: boolean = false;
+
+  private nftConfig?: {
+    contractAddress: string;
+    tokenId: string;
+    rpcUrl: string;
+  };
+
+  // NFT client (lazy initialized)
+  private nftClient?: ReturnType<typeof createPublicClient>;
+
   constructor(private readonly options: DistributorOptions) {
-    if (!options.validators.length) {
-      throw new Error(`No validators for distributor ${options.name}`);
+    this.parseValidatorConfigs();
+
+    // Para validation is MANDATORY - fail fast if not configured
+    if (!this.paraConfig) {
+      throw new Error(
+        `Para validation is required for distributor "${options.name}". ` +
+          `Security requires wallet addresses from verified JWT tokens.`
+      );
     }
 
     log.info("Distributor initialized", "distributor", undefined, {
-      id: options.id,
+      name: options.name,
       path: options.path,
-      validators: options.validators.length,
+      paraEnabled: !!this.paraConfig,
+      onceOnlyEnabled: this.onceOnlyEnabled,
+      nftEnabled: !!this.nftConfig,
     });
   }
 
-  get id() {
-    return this.options.id;
+  get path() {
+    return this.options.path;
   }
+
   get name() {
     return this.options.name;
   }
-  get path() {
-    return this.options.path;
+
+  get id() {
+    return this.options.distributorId;
+  }
+
+  private parseValidatorConfigs(): void {
+    if (!this.options.validatorConfigs) {
+      return;
+    }
+
+    const configs = this.options.validatorConfigs;
+
+    // Parse Para config (mandatory)
+    if (configs["para-account"]) {
+      this.paraConfig = ParaConfigSchema.parse(configs["para-account"]);
+    }
+
+    // Parse once-only config
+    if (configs["once-only"]) {
+      this.onceOnlyEnabled = true;
+    }
+
+    // Parse NFT config
+    if (configs["nft-ownership"]) {
+      this.nftConfig = NFTConfigSchema.parse(configs["nft-ownership"]);
+    }
   }
 
   async parseRequestFromBody(
@@ -51,6 +121,16 @@ export class Distributor {
       throw new Error("Missing visitorId");
     }
 
+    // Extract JWT token from Authorization header
+    const authHeader = headers.get("authorization");
+    const token = authHeader?.startsWith("Bearer ")
+      ? authHeader.slice(7)
+      : undefined;
+
+    if (!token) {
+      throw new Error("Authorization token is required");
+    }
+
     return {
       visitorId: rawBody.visitorId as string,
       clientIp:
@@ -58,42 +138,37 @@ export class Distributor {
         headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
         headers.get("x-real-ip") ||
         "",
-      token: headers.get("authorization")?.startsWith("Bearer ")
-        ? headers.get("authorization")!.slice(7)
-        : undefined,
+      token,
       ...rawBody,
     };
   }
 
-  async processClaim(request: ClaimRequest, requestId?: string): Promise<ClaimResult> {
+  async processClaim(
+    request: ClaimRequest,
+    requestId?: string
+  ): Promise<ClaimResult> {
     try {
-      let validationData: Record<string, unknown> = {};
+      // Step 1: Para validation - extract wallet addresses from JWT
+      const { embeddedWallet, externalWallet } = await this.validateParaAccount(
+        request.token as string,
+        requestId
+      );
 
-      for (const validator of this.options.validators) {
-        console.log("validator", validator.name);
-        const result = await validator.validate(request);
-        if (!result.success) {
-          throw new Error(result.error || "Validation failed");
-        }
-        if (result.data) {
-          validationData = { ...validationData, ...result.data };
-          Object.assign(request, result.data);
-        }
+      // // Step 2: Check once-only constraint if enabled
+      // if (this.onceOnlyEnabled) {
+      //   await this.validateOnceOnly(externalWallet, requestId);
+      // }
+
+      // Step 4: Check NFT ownership if configured
+      if (this.nftConfig) {
+        await this.validateNftOwnership(externalWallet, requestId);
       }
 
-      const walletAddress =
-        validationData.embeddedWallet ||
-        validationData.validatedWallet ||
-        request.walletAddress;
-
-      if (!walletAddress) {
-        throw new Error("No wallet address available");
-      }
-
+      // Step 5: Submit claim to QuickNode
       const response = await quickNodeService.submitClaim(
         this.options.distributorApiKey,
         {
-          address: walletAddress as string,
+          address: embeddedWallet,
           ip: request.clientIp,
           visitorId: request.visitorId,
         },
@@ -101,17 +176,14 @@ export class Distributor {
       );
 
       if (!response.success) {
-        throw new Error(response.message || "Claim rejected");
+        throw new Error(response.message || "Claim rejected by QuickNode");
       }
 
+      // Step 6: Record successful claim in database
       await queries.insertClaim({
         distributorId: this.options.distributorId,
-        embeddedWallet:
-          (validationData.embeddedWallet as string) ||
-          (walletAddress as string),
-        externalWallet:
-          (validationData.externalWallet as string) ||
-          (walletAddress as string),
+        embeddedWallet,
+        externalWallet,
         visitorId: request.visitorId,
         ip: request.clientIp,
         txId: response.transactionId || null,
@@ -125,8 +197,186 @@ export class Distributor {
         message: "Claim processed successfully",
       };
     } catch (error) {
-      log.error("Claim failed", "distributor", error, requestId);
-      throw error;
+      const message =
+        error instanceof Error ? error.message : "Claim processing failed";
+
+      if (requestId) {
+        log.info("Claim failed", "distributor", requestId, { error: message });
+      }
+
+      return { success: false, error: message };
+    }
+  }
+
+  /**
+   * Validate Para JWT and extract wallet addresses
+   * This is MANDATORY - we only trust wallets from verified JWT tokens
+   */
+  private async validateParaAccount(
+    token: string | undefined,
+    requestId?: string
+  ): Promise<{ embeddedWallet: string; externalWallet: string }> {
+    if (!token) {
+      throw new Error("Authorization token is required");
+    }
+
+    if (!this.paraConfig) {
+      throw new Error("Para validation not configured but is required");
+    }
+
+    // Validate JWT signature and expiration
+    const jwtResult = await validateParaJwt(token, this.paraConfig.paraJwksUrl);
+
+    if (!jwtResult.valid) {
+      throw new Error(`Invalid token: ${jwtResult.error}`);
+    }
+
+    // Extract wallet addresses from JWT payload
+    const payload = jwtResult.payload;
+    const data = payload.data;
+
+    // Get embedded wallet (Para wallet)
+    const embeddedWallet = data.wallets?.[0]?.address;
+
+    // Get external wallet
+    const externalWallet = data.externalWallets?.[0]?.address;
+
+    if (!embeddedWallet) {
+      throw new Error("No embedded wallet addresses found in Para token");
+    }
+
+    if (!externalWallet) {
+      throw new Error("No external wallet addresses found in Para token");
+    }
+
+    // Verify with Para project API
+    await this.verifyParaProject(embeddedWallet);
+
+    if (requestId) {
+      log.debug("Para validation successful", "distributor", requestId, {
+        embeddedWallet,
+        externalWallet,
+        userId: data.userId,
+      });
+    }
+
+    return { embeddedWallet, externalWallet };
+  }
+
+  /**
+   * Verify wallet with Para project API
+   */
+  private async verifyParaProject(address: string): Promise<void> {
+    if (!this.paraConfig) return;
+
+    const resp = await fetch(this.paraConfig.paraVerifyUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-external-api-key": this.paraConfig.paraSecretKey,
+      },
+      body: JSON.stringify({ address }),
+    });
+
+    if (resp.status === 404) {
+      // Wallet doesn't exist yet - that's ok
+      return;
+    }
+
+    if (!resp.ok) {
+      throw new Error(
+        `Para wallet verification failed: ${resp.status} ${resp.statusText}`
+      );
+    }
+  }
+
+  /**
+   * Check if wallet has already claimed (once-only validation)
+   */
+  private async validateOnceOnly(
+    walletAddress: string,
+    requestId?: string
+  ): Promise<void> {
+    const existingClaim = await queries.checkExistingClaim(
+      walletAddress,
+      this.options.distributorId
+    );
+
+    if (existingClaim) {
+      throw new Error(
+        `This wallet has already claimed from this faucet. Only one claim is allowed per wallet.`
+      );
+    }
+
+    if (requestId) {
+      log.debug("Once-only validation passed", "distributor", requestId);
+    }
+  }
+
+  /**
+   * Verify NFT ownership for the wallet
+   */
+  private async validateNftOwnership(
+    walletAddress: string,
+    requestId?: string
+  ): Promise<void> {
+    if (!this.nftConfig) return;
+
+    // Validate wallet address format
+    if (!/^0x[a-fA-F0-9]{40}$/.test(walletAddress)) {
+      throw new Error("Invalid wallet address format for NFT verification");
+    }
+
+    // Initialize NFT client if needed
+    if (!this.nftClient) {
+      this.nftClient = createPublicClient({
+        transport: http(this.nftConfig.rpcUrl),
+      });
+    }
+
+    try {
+      const balanceEth = await this.nftClient.getBalance({
+        address: walletAddress as `0x${string}`,
+      });
+      console.log("tokenID", this.nftConfig.tokenId);
+      console.log("walletAddress", walletAddress);
+      console.log("balance: ", balanceEth);
+      console.log(
+        "this.nftConfig.contractAddress: ",
+        this.nftConfig.contractAddress
+      );
+
+      const balance = await this.nftClient.readContract({
+        address: this.nftConfig.contractAddress as `0x${string}`,
+        abi: ERC1155_ABI,
+        functionName: "balanceOf",
+        args: [walletAddress as `0x${string}`, BigInt(this.nftConfig.tokenId)],
+      });
+
+      if (BigInt(balance) === 0n) {
+        throw new Error(
+          `NFT ownership validation failed. Required token ID ${this.nftConfig.tokenId} not owned.`
+        );
+      }
+
+      if (requestId) {
+        log.debug("NFT ownership validated", "distributor", requestId, {
+          walletAddress,
+          tokenId: this.nftConfig.tokenId,
+          balance: balance.toString(),
+        });
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("NFT ownership")) {
+        throw error; // Re-throw our own error
+      }
+
+      // Wrap contract errors
+      throw new Error(
+        `NFT validation failed: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`
+      );
     }
   }
 
@@ -135,11 +385,15 @@ export class Distributor {
       status: "ok",
       timestamp: new Date().toISOString(),
       details: {
-        distributorId: this.options.id,
+        distributorId: this.options.distributorId,
         name: this.options.name,
         path: this.options.path,
-        validatorCount: this.options.validators.length,
         dripAmount: this.options.dripAmount,
+        validators: {
+          para: !!this.paraConfig,
+          onceOnly: this.onceOnlyEnabled,
+          nft: !!this.nftConfig,
+        },
       },
     };
   }

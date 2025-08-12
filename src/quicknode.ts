@@ -45,7 +45,11 @@ class QuickNodeService {
     requestId?: string
   ): Promise<QuickNodeClaimResponse> {
     if (requestId) {
-      log.info("Submitting claim", "quicknode", requestId, { address: request.address });
+      log.info("Submitting claim", "quicknode", requestId, {
+        address: request.address,
+        visitorId: request.visitorId,
+        ip: request.ip,
+      });
     }
 
     try {
@@ -63,15 +67,18 @@ class QuickNodeService {
 
       const responseText = await response.text();
 
-      // Handle errors
+      // Handle errors with requestId for tracing
       if (!response.ok) {
-        return this.handleClaimError(response.status, responseText);
+        return this.handleClaimError(response.status, responseText, requestId);
       }
 
       const data = JSON.parse(responseText);
 
       if (requestId) {
-        log.info("Claim submitted", "quicknode", requestId, { txId: data.transactionId });
+        log.info("Claim submitted successfully", "quicknode", requestId, {
+          txId: data.transactionId,
+          address: request.address,
+        });
       }
 
       return {
@@ -80,7 +87,10 @@ class QuickNodeService {
         message: "Claim processed successfully",
       };
     } catch (error) {
-      log.error("Claim submission failed", "quicknode", error, requestId);
+      log.error("Claim submission failed", "quicknode", error, requestId, {
+        address: request.address,
+        distributorApiKey: distributorApiKey.substring(0, 8) + "...", // Log partial key for debugging
+      });
       throw error;
     }
   }
@@ -168,23 +178,31 @@ class QuickNodeService {
         }
 
         // Rule updated - suppressed for noise reduction
-        await new Promise(resolve => setTimeout(resolve, 300));
+        await new Promise((resolve) => setTimeout(resolve, 300));
       }
     } catch (error) {
       log.error("Failed to update rules", "quicknode", error);
       throw error;
     }
   }
-
   /**
-   * Handle claim errors
+   * Handle claim errors with proper logging
    */
   private handleClaimError(
     status: number,
-    responseText: string
+    responseText: string,
+    requestId?: string
   ): QuickNodeClaimResponse {
     try {
       const errorData = JSON.parse(responseText);
+
+      // Log the actual error from QuickNode
+      log.error("QuickNode claim rejected", "quicknode", null, requestId, {
+        status,
+        errorData,
+        isTapClosed: errorData.data?.isTapClosed,
+        message: errorData.message,
+      });
 
       // Daily limit reached
       if (errorData.data?.isTapClosed === true) {
@@ -199,8 +217,19 @@ class QuickNodeService {
         success: false,
         message: errorData.message || `QuickNode API error (${status})`,
       };
-    } catch {
-      // Can't parse error
+    } catch (parseError) {
+      // Log parsing error
+      log.error(
+        "Failed to parse QuickNode error response",
+        "quicknode",
+        parseError,
+        requestId,
+        {
+          status,
+          responseText: responseText.substring(0, 500), // Limit log size
+        }
+      );
+
       return {
         success: false,
         message: `QuickNode API error (${status})`,

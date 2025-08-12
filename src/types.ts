@@ -2,14 +2,16 @@ export interface GlobalConfig {
   partner_api_key: string;
   quicknode_api_url: string;
   distributors: {
-    [name: string]: {
-      distributor_id: string;
-      distributor_api_key: string;
-      path: string;
-      drip_amount: number;
-      drip_interval?: string;
-      drip_per_interval?: number;
-      validators: {
+    [path: string]: {
+      // path is the key
+      kind?: string;
+      distributorId: string;
+      distributorApiKey: string;
+      name: string; // name is a field
+      dripAmount: number;
+      dripInterval?: string;
+      dripPerInterval?: number;
+      validators?: {
         [validatorName: string]: Record<string, unknown>;
       };
     };
@@ -118,16 +120,23 @@ export interface DistributorRules {
   MAINNET_TRANSACTION_COUNT?: number;
 }
 
-/**
- * Keys for distributor rules
- */
-export type DistributorRuleKey = keyof DistributorRules;
-
-/**
- * Validator interface
- */
 export interface IValidator {
   readonly name: string;
   readonly configSchema?: unknown;
   validate(request: ClaimRequest): Promise<ValidationResult>;
+}
+
+/**
+ * Distributor interface for different implementation strategies
+ */
+export interface IDistributor {
+  readonly id: string;
+  readonly name: string;
+  readonly path: string;
+
+  parseRequestFromBody(body: unknown, headers: Headers): Promise<ClaimRequest>;
+
+  processClaim(request: ClaimRequest, requestId?: string): Promise<ClaimResult>;
+
+  healthCheck(): Promise<HealthStatus>;
 }

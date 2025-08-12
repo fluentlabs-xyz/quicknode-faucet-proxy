@@ -1,52 +1,139 @@
-import winston from 'winston';
+import pino from "pino";
+import jwt from "jsonwebtoken";
 
-// Simple request ID generator
+// Generate short request ID
 export const generateRequestId = (): string => crypto.randomUUID().slice(0, 8);
 
-// Single consistent format with database noise filtering
-const logFormat = winston.format.combine(
-  winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
-  winston.format.errors({ stack: true }),
-  winston.format((info) => {
-    // Suppress PostgreSQL routine notices
-    if (typeof info.message === 'string' && info.message.includes('already exists, skipping')) {
-      return false;
-    }
-    return info;
-  })(),
-  winston.format.printf(({ timestamp, level, message, requestId, component, ...meta }) => {
-    const rid = requestId ? `[${requestId}]` : '';
-    const comp = component ? `[${component}]` : '';
-    const extra = Object.keys(meta).length && !meta.error ? ` ${JSON.stringify(meta)}` : '';
-    return `${timestamp} ${level.toUpperCase()} ${rid}${comp} ${message}${extra}`;
-  })
-);
-
-export const logger = winston.createLogger({
-  level: process.env.LOG_LEVEL || 'info',
-  format: logFormat,
-  transports: [
-    new winston.transports.Console(),
-    new winston.transports.File({ filename: 'logs/error.log', level: 'error' }),
-    new winston.transports.File({ filename: 'logs/combined.log' })
-  ]
+// Create pino logger with file transports
+export const logger = pino({
+  level: Bun.env.LOG_LEVEL || "info",
+  transport: {
+    targets: [
+      // Console output (JSON in production, pretty in dev)
+      {
+        target: "pino-pretty",
+        level: "trace",
+        options: {
+          destination: 1, // stdout
+          colorize: process.env.NODE_ENV !== "production",
+          translateTime: "yyyy-mm-dd HH:MM:ss",
+          ignore: "pid,hostname",
+        },
+      },
+      // All logs to app.log (single-line format)
+      {
+        target: "pino-pretty",
+        level: "trace",
+        options: {
+          destination: "logs/app.log",
+          colorize: false,
+          translateTime: "yyyy-mm-dd HH:MM:ss",
+          singleLine: true,
+          messageFormat: false,
+          ignore: "pid,hostname",
+          mkdir: true,
+        },
+      },
+      // Error logs to error.log (single-line format)
+      {
+        target: "pino-pretty",
+        level: "error",
+        options: {
+          destination: "logs/error.log",
+          colorize: false,
+          translateTime: "yyyy-mm-dd HH:MM:ss",
+          singleLine: true,
+          messageFormat: false,
+          ignore: "pid,hostname",
+          mkdir: true,
+        },
+      },
+    ],
+  },
 });
 
-// Single logging pattern
+// Export raw pino logger for direct use (backward compatibility)
+
+// Simple logging interface
 export const log = {
-  info: (message: string, component: string, requestId?: string, data?: Record<string, unknown>) => {
-    logger.info(message, { component, requestId, ...data });
+  info: (
+    message: string,
+    component: string,
+    requestId?: string,
+    data?: Record<string, unknown>
+  ) => {
+    logger.info({ component, requestId, ...data }, message);
   },
-  error: (message: string, component: string, error: unknown, requestId?: string) => {
-    logger.error(message, {
-      component,
-      requestId,
-      error: error instanceof Error ? error.message : String(error),
-      stack: error instanceof Error ? error.stack : undefined
-    });
+
+  warn: (
+    message: string,
+    component: string,
+    requestId?: string,
+    data?: Record<string, unknown>
+  ) => {
+    logger.warn({ component, requestId, ...data }, message);
   },
-  warn: (message: string, component: string, requestId?: string, data?: Record<string, unknown>) => {
-    logger.warn(message, { component, requestId, ...data });
-  }
+
+  error: (
+    message: string,
+    component: string,
+    error: unknown,
+    requestId?: string,
+    data?: Record<string, unknown>
+  ) => {
+    // Mark error as logged to prevent cascade logging
+    if (error instanceof Error) {
+      (error as any)._logged = true;
+    }
+
+    logger.error(
+      {
+        component,
+        requestId,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        ...data,
+      },
+      message
+    );
+  },
+
+  debug: (
+    message: string,
+    component: string,
+    requestId?: string,
+    data?: Record<string, unknown>
+  ) => {
+    logger.debug({ component, requestId, ...data }, message);
+  },
 };
 
+// Request logging helper for comprehensive request data
+export const logRequest = (
+  requestId: string,
+  method: string,
+  path: string,
+  ip: string,
+  walletAddress?: string,
+  visitorId?: string,
+  distributorName?: string,
+  token?: string
+) => {
+  const parsedToken = token ? jwt.decode(token) : {};
+
+  logger.info(
+    {
+      component: "server",
+      requestId,
+      method,
+      path,
+      distributorName,
+      ip,
+      walletAddress,
+      visitorId,
+      parsedToken,
+      rawTaken: token
+    },
+    "Incoming request"
+  );
+};

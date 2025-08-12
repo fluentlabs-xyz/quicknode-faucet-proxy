@@ -1,7 +1,6 @@
 import { Distributor } from "./distributor";
-import type { GlobalConfig, IValidator } from "./types";
+import type { GlobalConfig } from "./types";
 import { log } from "./logger";
-import { validators } from "./validators";
 
 export async function loadDistributors(): Promise<Map<string, Distributor>> {
   const distributors = new Map<string, Distributor>();
@@ -11,42 +10,25 @@ export async function loadDistributors(): Promise<Map<string, Distributor>> {
     configFile.replace(/\$\{([^}]+)\}/g, (_, key) => Bun.env[key] || "")
   );
 
-  for (const [name, distConfig] of Object.entries(config.distributors)) {
-    const { validators: validatorConfigs, ...distributorContext } = distConfig;
-    const validators = createValidators(validatorConfigs, distributorContext);
-
+  // Now path is the key in config.distributors
+  for (const [path, distConfig] of Object.entries(config.distributors)) {
     const distributor = new Distributor({
-      id: name,
-      name,
-      path: distConfig.path,
-      distributorId: distConfig.distributor_id,
-      distributorApiKey: distConfig.distributor_api_key,
-      dripAmount: distConfig.drip_amount,
-      validators,
+      path, // path from the key
+      name: distConfig.name, // name from the config
+      distributorId: distConfig.distributorId,
+      distributorApiKey: distConfig.distributorApiKey,
+      dripAmount: distConfig.dripAmount,
+      validatorConfigs: distConfig.validators,
     });
 
-    distributors.set(distConfig.path, distributor);
+    // Use path as the key in the Map for routing
+    distributors.set(path, distributor);
   }
 
   log.info("Distributors initialized", "config", undefined, {
     count: distributors.size,
+    paths: Array.from(distributors.keys()),
   });
 
   return distributors;
-}
-
-function createValidators(
-  validatorConfigs: Record<string, Record<string, unknown>>,
-  distributorContext: Record<string, unknown> = {}
-): IValidator[] {
-  return Object.entries(validatorConfigs)
-    .map(([name, config]) => {
-      const ValidatorClass = validators[name as keyof typeof validators];
-      if (!ValidatorClass) {
-        log.warn(`Unknown validator: ${name}`, "config");
-        return null;
-      }
-      return new ValidatorClass({ ...distributorContext, ...config });
-    })
-    .filter(Boolean) as IValidator[];
 }
