@@ -1,5 +1,5 @@
 import { log } from "./logger";
-import type { DistributorRules, DripInterval } from "./types";
+import type { QuickNodeRules, DripInterval } from "./types";
 
 export interface QuickNodeClaimRequest {
   address: string;
@@ -98,7 +98,7 @@ class QuickNodeService {
   /**
    * Get distributor rules from QuickNode
    */
-  async getDistributorRules(distributorId: string): Promise<DistributorRules> {
+  async getQuickNodeRules(distributorId: string): Promise<QuickNodeRules> {
     // Suppress routine rule fetching logs
 
     try {
@@ -120,7 +120,7 @@ class QuickNodeService {
       };
 
       // Convert to simple object with proper type handling
-      const rules: DistributorRules = {};
+      const rules: QuickNodeRules = {};
 
       for (const rule of data.rules) {
         switch (rule.key) {
@@ -150,9 +150,9 @@ class QuickNodeService {
    * Update distributor rules
    * Creates or updates rules - QuickNode handles deduplication
    */
-  async updateDistributorRules(
+  async updateQuickNodeRules(
     distributorId: string,
-    rules: DistributorRules
+    rules: QuickNodeRules
   ): Promise<void> {
     // Suppress routine rule update logs
 

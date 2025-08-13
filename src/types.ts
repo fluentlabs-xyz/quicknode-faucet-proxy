@@ -109,34 +109,4 @@ export interface QuickNodeRules {
   DEFAULT_DRIP_AMOUNT?: number;
 }
 
-/**
- * Distributor-level rules (what we typically set)
- */
-export interface DistributorRules {
-  DEFAULT_DRIP_AMOUNT?: number;
-  DRIP_PER_INTERVAL?: number;
-  DRIP_INTERVAL?: DripInterval;
-  MAINNET_BALANCE?: number;
-  MAINNET_TRANSACTION_COUNT?: number;
-}
-
-export interface IValidator {
-  readonly name: string;
-  readonly configSchema?: unknown;
-  validate(request: ClaimRequest): Promise<ValidationResult>;
-}
-
-/**
- * Distributor interface for different implementation strategies
- */
-export interface IDistributor {
-  readonly id: string;
-  readonly name: string;
-  readonly path: string;
-
-  parseRequestFromBody(body: unknown, headers: Headers): Promise<ClaimRequest>;
-
-  processClaim(request: ClaimRequest, requestId?: string): Promise<ClaimResult>;
-
-  healthCheck(): Promise<HealthStatus>;
-}
+export type QuickNodeRuleKey = keyof QuickNodeRules;
