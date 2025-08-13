@@ -13,8 +13,9 @@ services:
       - "${POSTGRES_PORT}:5432"
     volumes:
       - ./pgdata:/var/lib/postgresql/data
+    env_file: .env
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER:-faucet}"]
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER:-faucet}", "-d", "${POSTGRES_DB:-faucetdb}"]
       interval: 10s
       timeout: 5s
       retries: 5
