@@ -14,9 +14,11 @@ if (!distributorId) {
 
 // --- Set rules here (for convenience, you can move this to a separate config) ---
 const RULES: QuickNodeRules = {
-  DRIP_PER_INTERVAL: 10,
-  DRIP_INTERVAL: "THIRTY_MINUTES",
-  DEFAULT_DRIP_AMOUNT: 0.2,
+  TOTAL_DRIP_PER_INTERVAL: 2000,
+  TOTAL_DRIP_INTERVAL: "ONE_DAY",
+  DRIP_PER_INTERVAL: 1,
+  DRIP_INTERVAL: "ONE_DAY",
+  DEFAULT_DRIP_AMOUNT: 0.5,
   // If you want to remove a rule, simply omit it here
 };
 
