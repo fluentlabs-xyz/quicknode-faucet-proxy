@@ -1,6 +1,6 @@
 import { log } from "./logger";
 import { ensureDatabase } from "./db";
-import { loadDistributors } from "./distributor";
+import { createDistributors } from "./distributor";
 import { createServer } from "./server";
 
 // Start application
@@ -9,10 +9,11 @@ try {
 
   // Initialize
   await ensureDatabase();
+
   if (!Bun.env.CONFIG_PATH) {
     throw new Error("CONFIG_PATH is required");
   }
-  const distributors = await loadDistributors(Bun.env.CONFIG_PATH!);
+  const distributors = await createDistributors(Bun.env.CONFIG_PATH!);
   const server = createServer(distributors);
 
   log.info(`Server running on port ${server.port}`, "startup");

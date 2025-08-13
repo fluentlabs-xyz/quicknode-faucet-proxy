@@ -84,7 +84,7 @@ export function createServer(distributors: Map<string, Distributor>) {
           ip,
           claimRequest.walletAddress as string,
           claimRequest.visitorId,
-          distributor.name,
+          distributor.path,
           claimRequest.token
         );
 

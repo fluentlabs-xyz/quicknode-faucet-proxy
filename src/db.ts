@@ -2,7 +2,9 @@
 import postgres from "postgres";
 import { log } from "./logger";
 
-console.log("db url:", Bun.env.DATABASE_URL);
+if (!Bun.env.DATABASE_URL) {
+  throw new Error("DATABASE_URL environment variable is required");
+}
 
 // Simple database connection
 const sql = postgres(Bun.env.DATABASE_URL!, {

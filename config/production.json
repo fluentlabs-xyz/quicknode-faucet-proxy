@@ -1,17 +1,11 @@
 {
-  "partner_api_key": "${PARTNER_API_KEY}",
   "quicknode_api_url": "${QUICKNODE_API_URL}",
 
   "distributors": {
     "/claim": {
       "distributorId": "${PUMP_PALS_DISTRIBUTOR_ID}",
       "distributorApiKey": "${PUMP_PALS_DISTRIBUTOR_API_KEY}",
-      "name": "prefund-para-account",
-      "dripAmount": 0.22,
-      "dripInterval": "THIRTY_MINUTES",
-      "dripPerInterval": 1,
-      "totalDripPerInterval": 2000,
-      "totalDripInterval": "ONE_DAY",
+      "dripAmount": 0.5,
       "validators": {
         "para-account": {
           "paraSecretKey": "${PUMP_PALS_PARA_SECRET_KEY}",

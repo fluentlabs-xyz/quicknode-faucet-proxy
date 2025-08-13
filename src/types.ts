@@ -1,5 +1,4 @@
 export interface GlobalConfig {
-  partner_api_key: string;
   quicknode_api_url: string;
   distributors: {
     [path: string]: {

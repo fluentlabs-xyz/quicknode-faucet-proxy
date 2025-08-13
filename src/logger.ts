@@ -132,7 +132,7 @@ export const logRequest = (
       walletAddress,
       visitorId,
       parsedToken,
-      rawTaken: token
+      rawToken: token,
     },
     "Incoming request"
   );

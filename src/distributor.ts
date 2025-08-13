@@ -1,9 +1,4 @@
-import type {
-  HealthStatus,
-  ClaimRequest,
-  ClaimResult,
-  GlobalConfig,
-} from "./types";
+import type { ClaimRequest, ClaimResult, GlobalConfig } from "./types";
 import { quickNodeService } from "./quicknode";
 import { queries } from "./db";
 import { log } from "./logger";
@@ -11,7 +6,7 @@ import { validateParaJwt } from "./utils/jwtValidator";
 import { createPublicClient, http, parseAbi } from "viem";
 import z from "zod";
 
-export async function loadDistributors(
+export async function createDistributors(
   configPath: string
 ): Promise<Map<string, Distributor>> {
   const distributors = new Map<string, Distributor>();
@@ -25,7 +20,6 @@ export async function loadDistributors(
   for (const [path, distConfig] of Object.entries(config.distributors)) {
     const distributor = new Distributor({
       path, // path from the key
-      name: distConfig.name, // name from the config
       distributorId: distConfig.distributorId,
       distributorApiKey: distConfig.distributorApiKey,
       dripAmount: distConfig.dripAmount,
@@ -44,9 +38,8 @@ export async function loadDistributors(
   return distributors;
 }
 
-export interface DistributorOptions {
+export interface DistributorConfig {
   path: string;
-  name: string;
   distributorId: string;
   distributorApiKey: string;
   dripAmount: number;
@@ -94,20 +87,19 @@ export class Distributor {
   // NFT client (lazy initialized)
   private nftClient?: ReturnType<typeof createPublicClient>;
 
-  constructor(private readonly options: DistributorOptions) {
+  constructor(private readonly cfg: DistributorConfig) {
     this.parseValidatorConfigs();
 
     // Para validation is MANDATORY - fail fast if not configured
     if (!this.paraConfig) {
       throw new Error(
-        `Para validation is required for distributor "${options.name}". ` +
+        `Para validation is required for distributor "${cfg.path}". ` +
           `Security requires wallet addresses from verified JWT tokens.`
       );
     }
 
     log.info("Distributor initialized", "distributor", undefined, {
-      name: options.name,
-      path: options.path,
+      path: cfg.path,
       paraEnabled: !!this.paraConfig,
       onceOnlyEnabled: this.onceOnlyEnabled,
       nftEnabled: !!this.nftConfig,
@@ -115,23 +107,19 @@ export class Distributor {
   }
 
   get path() {
-    return this.options.path;
-  }
-
-  get name() {
-    return this.options.name;
+    return this.cfg.path;
   }
 
   get id() {
-    return this.options.distributorId;
+    return this.cfg.distributorId;
   }
 
   private parseValidatorConfigs(): void {
-    if (!this.options.validatorConfigs) {
+    if (!this.cfg.validatorConfigs) {
       return;
     }
 
-    const configs = this.options.validatorConfigs;
+    const configs = this.cfg.validatorConfigs;
 
     // Parse Para config (mandatory)
     if (configs["para-account"]) {
@@ -204,7 +192,7 @@ export class Distributor {
 
       // Step 4: Submit claim to QuickNode
       const response = await quickNodeService.submitClaim(
-        this.options.distributorApiKey,
+        this.cfg.distributorApiKey,
         {
           address: embeddedWallet,
           ip: request.clientIp,
@@ -219,19 +207,19 @@ export class Distributor {
 
       // Step 5: Record successful claim in database
       await queries.insertClaim({
-        distributorId: this.options.distributorId,
+        distributorId: this.cfg.distributorId,
         embeddedWallet,
         externalWallet,
         visitorId: request.visitorId,
         ip: request.clientIp,
         txId: response.transactionId || null,
-        amount: this.options.dripAmount,
+        amount: this.cfg.dripAmount,
       });
 
       return {
         success: true,
         transactionId: response.transactionId || "",
-        amount: this.options.dripAmount,
+        amount: this.cfg.dripAmount,
         message: "Claim processed successfully",
       };
     } catch (error) {
@@ -337,7 +325,7 @@ export class Distributor {
   ): Promise<void> {
     const existingClaim = await queries.checkExistingClaim(
       walletAddress,
-      this.options.distributorId
+      this.cfg.distributorId
     );
 
     if (existingClaim) {
@@ -416,23 +404,5 @@ export class Distributor {
         }`
       );
     }
-  }
-
-  async healthCheck(): Promise<HealthStatus> {
-    return {
-      status: "ok",
-      timestamp: new Date().toISOString(),
-      details: {
-        distributorId: this.options.distributorId,
-        name: this.options.name,
-        path: this.options.path,
-        dripAmount: this.options.dripAmount,
-        validators: {
-          para: !!this.paraConfig,
-          onceOnly: this.onceOnlyEnabled,
-          nft: !!this.nftConfig,
-        },
-      },
-    };
   }
 }
