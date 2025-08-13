@@ -1,10 +1,48 @@
-import type { HealthStatus, ClaimRequest, ClaimResult } from "./types";
+import type {
+  HealthStatus,
+  ClaimRequest,
+  ClaimResult,
+  GlobalConfig,
+} from "./types";
 import { quickNodeService } from "./quicknode";
-import { queries } from "./database";
+import { queries } from "./db";
 import { log } from "./logger";
 import { validateParaJwt } from "./utils/jwtValidator";
 import { createPublicClient, http, parseAbi } from "viem";
 import z from "zod";
+
+export async function loadDistributors(
+  configPath: string
+): Promise<Map<string, Distributor>> {
+  const distributors = new Map<string, Distributor>();
+
+  const configFile = await Bun.file(configPath).text();
+  const config: GlobalConfig = JSON.parse(
+    configFile.replace(/\$\{([^}]+)\}/g, (_, key) => Bun.env[key] || "")
+  );
+
+  // Now path is the key in config.distributors
+  for (const [path, distConfig] of Object.entries(config.distributors)) {
+    const distributor = new Distributor({
+      path, // path from the key
+      name: distConfig.name, // name from the config
+      distributorId: distConfig.distributorId,
+      distributorApiKey: distConfig.distributorApiKey,
+      dripAmount: distConfig.dripAmount,
+      validatorConfigs: distConfig.validators,
+    });
+
+    // Use path as the key in the Map for routing
+    distributors.set(path, distributor);
+  }
+
+  log.info("Distributors initialized", "config", undefined, {
+    count: distributors.size,
+    paths: Array.from(distributors.keys()),
+  });
+
+  return distributors;
+}
 
 export interface DistributorOptions {
   path: string;
@@ -154,17 +192,17 @@ export class Distributor {
         requestId
       );
 
-      // // Step 2: Check once-only constraint if enabled
-      // if (this.onceOnlyEnabled) {
-      //   await this.validateOnceOnly(externalWallet, requestId);
-      // }
+      // Step 2: Check once-only constraint if enabled
+      if (this.onceOnlyEnabled) {
+        await this.validateOnceOnly(externalWallet, requestId);
+      }
 
-      // Step 4: Check NFT ownership if configured
+      // Step 3: Check NFT ownership if configured
       if (this.nftConfig) {
         await this.validateNftOwnership(externalWallet, requestId);
       }
 
-      // Step 5: Submit claim to QuickNode
+      // Step 4: Submit claim to QuickNode
       const response = await quickNodeService.submitClaim(
         this.options.distributorApiKey,
         {
@@ -179,7 +217,7 @@ export class Distributor {
         throw new Error(response.message || "Claim rejected by QuickNode");
       }
 
-      // Step 6: Record successful claim in database
+      // Step 5: Record successful claim in database
       await queries.insertClaim({
         distributorId: this.options.distributorId,
         embeddedWallet,

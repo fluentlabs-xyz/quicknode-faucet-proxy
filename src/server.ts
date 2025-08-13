@@ -2,7 +2,7 @@ import { log, generateRequestId, logRequest } from "./logger";
 import type { Distributor } from "./distributor";
 
 export function createServer(distributors: Map<string, Distributor>) {
-  const port = Number(process.env.PORT) || 8080;
+  const port = Number(Bun.env.PORT) || 8080;
 
   const publicServer = Bun.serve({
     port,

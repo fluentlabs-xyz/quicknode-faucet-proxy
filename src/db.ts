@@ -2,15 +2,14 @@
 import postgres from "postgres";
 import { log } from "./logger";
 
+console.log("db url:", Bun.env.DATABASE_URL);
+
 // Simple database connection
-const sql = postgres(
-  Bun.env.DATABASE_URL || "postgresql://localhost/faucet",
-  {
-    max: 10,
-    idle_timeout: 20,
-    connect_timeout: 10,
-  }
-);
+const sql = postgres(Bun.env.DATABASE_URL!, {
+  max: 10,
+  idle_timeout: 20,
+  connect_timeout: 10,
+});
 
 /**
  * Ensure database is ready

@@ -1,0 +1,30 @@
+{
+  "partner_api_key": "${PARTNER_API_KEY}",
+  "quicknode_api_url": "${QUICKNODE_API_URL}",
+
+  "distributors": {
+    "/claim": {
+      "distributorId": "${PUMP_PALS_DISTRIBUTOR_ID}",
+      "distributorApiKey": "${PUMP_PALS_DISTRIBUTOR_API_KEY}",
+      "name": "prefund-para-account",
+      "dripAmount": 0.22,
+      "dripInterval": "THIRTY_MINUTES",
+      "dripPerInterval": 1,
+      "totalDripPerInterval": 2000,
+      "totalDripInterval": "ONE_DAY",
+      "validators": {
+        "para-account": {
+          "paraSecretKey": "${PUMP_PALS_PARA_SECRET_KEY}",
+          "paraJwksUrl": "https://api.beta.getpara.com/.well-known/jwks.json",
+          "paraVerifyUrl": "https://api.beta.getpara.com/wallets/verify"
+        },
+        "once-only": {},
+        "nft-ownership": {
+          "contractAddress": "0x27BE45b6a8deB80CD8636272eb62FA4aA9e5Ee34",
+          "tokenId": "1",
+          "rpcUrl": "https://rpc.dev.gblend.xyz"
+        }
+      }
+    }
+  }
+}

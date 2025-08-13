@@ -15,7 +15,7 @@ export const logger = pino({
         level: "trace",
         options: {
           destination: 1, // stdout
-          colorize: process.env.NODE_ENV !== "production",
+          colorize: Bun.env.NODE_ENV !== "production",
           translateTime: "yyyy-mm-dd HH:MM:ss",
           ignore: "pid,hostname",
         },
