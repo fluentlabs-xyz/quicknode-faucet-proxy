@@ -4,6 +4,13 @@ import type { Distributor } from "./distributor";
 export function createServer(distributors: Map<string, Distributor>) {
   const port = Number(Bun.env.PORT) || 8080;
 
+  const corsHeaders = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Max-Age": "86400",
+  };
+
   const publicServer = Bun.serve({
     port,
     hostname: "0.0.0.0",
@@ -20,22 +27,36 @@ export function createServer(distributors: Map<string, Distributor>) {
         req.headers.get("x-real-ip") ||
         "unknown";
 
+
+      if (req.method === "OPTIONS") {
+        return new Response(null, {
+          status: 204,
+          headers: corsHeaders,
+        });
+      }
+
       try {
         if (pathname === "/healthz") {
-          return Response.json({
-            status: "ok",
-            timestamp: new Date().toISOString(),
-            distributors: distributors.size,
-          });
+          return Response.json(
+            {
+              status: "ok",
+              timestamp: new Date().toISOString(),
+              distributors: distributors.size,
+            },
+            { headers: corsHeaders }
+          );
         }
 
         if (pathname === "/" && req.method === "GET") {
-          return Response.json({
-            service: "QuickNode Faucet Proxy",
-            version: "1.0.0",
-            endpoints: Array.from(distributors.keys()),
-            health: "/healthz",
-          });
+          return Response.json(
+            {
+              service: "QuickNode Faucet Proxy",
+              version: "1.0.0",
+              endpoints: Array.from(distributors.keys()),
+              health: "/healthz",
+            },
+            { headers: corsHeaders }
+          );
         }
 
         const distributor = distributors.get(pathname);
@@ -47,7 +68,7 @@ export function createServer(distributors: Map<string, Distributor>) {
               error: "Endpoint not found",
               available: Array.from(distributors.keys()),
             },
-            { status: 404 }
+            { status: 404, headers: corsHeaders }
           );
         }
 
@@ -57,7 +78,7 @@ export function createServer(distributors: Map<string, Distributor>) {
               error: "Method not allowed",
               allowed: ["POST"],
             },
-            { status: 405 }
+            { status: 405, headers: corsHeaders }
           );
         }
 
@@ -67,7 +88,7 @@ export function createServer(distributors: Map<string, Distributor>) {
             {
               error: "Invalid JSON body",
             },
-            { status: 400 }
+            { status: 400, headers: corsHeaders }
           );
         }
 
@@ -119,11 +140,14 @@ export function createServer(distributors: Map<string, Distributor>) {
             statusCode = 503;
           }
 
-          return Response.json(result, { status: statusCode });
+          return Response.json(result, {
+            status: statusCode,
+            headers: corsHeaders,
+          });
         }
 
         // Success - return 200
-        return Response.json(result);
+        return Response.json(result, { headers: corsHeaders });
       } catch (error) {
         log.error("Request failed", "server", error, requestId);
 
@@ -138,7 +162,7 @@ export function createServer(distributors: Map<string, Distributor>) {
                 success: false,
                 error: error.message,
               },
-              { status: 400 }
+              { status: 400, headers: corsHeaders }
             );
           }
         }
@@ -148,7 +172,7 @@ export function createServer(distributors: Map<string, Distributor>) {
             success: false,
             error: "Internal server error",
           },
-          { status: 500 }
+          { status: 500, headers: corsHeaders }
         );
       }
     },
@@ -160,7 +184,7 @@ export function createServer(distributors: Map<string, Distributor>) {
           success: false,
           error: "Server error",
         },
-        { status: 500 }
+        { status: 500, headers: corsHeaders }
       );
     },
   });
@@ -171,6 +195,7 @@ export function createServer(distributors: Map<string, Distributor>) {
     public: publicServer.port,
   });
   log.info(`Routes: ${routes}`, "startup");
+  log.info("CORS enabled for all origins (*)", "startup");
 
   return publicServer;
 }
