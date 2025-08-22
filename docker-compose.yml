@@ -10,11 +10,12 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-faucetdb}
       PGDATA: /var/lib/postgresql/data/pgdata
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_PORT}:5432"
     volumes:
       - ./pgdata:/var/lib/postgresql/data
+    env_file: .env
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER:-faucet}"]
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER:-faucet}", "-d", "${POSTGRES_DB:-faucetdb}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -28,5 +29,8 @@ services:
     ports:
       - "8080:8080"
     env_file: .env
+    volumes:
+      - "./logs:/app/logs"
+      - "./config:/app/config"
 volumes:
   pg_data:

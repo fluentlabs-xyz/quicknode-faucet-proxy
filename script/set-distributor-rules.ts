@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { DistributorRules, DistributorRuleKey } from "../src/types";
+import type { QuickNodeRules, QuickNodeRuleKey } from "../src/types";
 
 const PARTNER_API_KEY = Bun.env.PARTNER_API_KEY!;
 const API_URL = Bun.env.FAUCET_API_URL || "https://api.faucet.quicknode.com";
@@ -13,15 +13,17 @@ if (!distributorId) {
 }
 
 // --- Set rules here (for convenience, you can move this to a separate config) ---
-const RULES: DistributorRules = {
-  DRIP_PER_INTERVAL: 10,
-  DRIP_INTERVAL: "THIRTY_MINUTES",
-  DEFAULT_DRIP_AMOUNT: 0.2,
+const RULES: QuickNodeRules = {
+  TOTAL_DRIP_PER_INTERVAL: 2000,
+  TOTAL_DRIP_INTERVAL: "ONE_DAY",
+  DRIP_PER_INTERVAL: 1,
+  DRIP_INTERVAL: "ONE_DAY",
+  DEFAULT_DRIP_AMOUNT: 0.5,
   // If you want to remove a rule, simply omit it here
 };
 
 // --- Get current distributor rules ---
-async function getDistributorRules(distributorId: string) {
+async function getQuickNodeRules(distributorId: string) {
   const resp = await axios.get(
     `${API_URL}/partners/distributors/${distributorId}/rules`,
     {
@@ -44,7 +46,7 @@ async function deleteRule(distributorId: string, ruleUuid: string) {
 // --- Create or update a rule ---
 async function setRule(
   distributorId: string,
-  key: DistributorRuleKey,
+  key: QuickNodeRuleKey,
   value: string | number
 ) {
   await axios.post(
@@ -55,12 +57,12 @@ async function setRule(
 }
 
 // --- Main logic ---
-async function syncDistributorRules(
+async function syncQuickNodeRules(
   distributorId: string,
-  rules: DistributorRules
+  rules: QuickNodeRules
 ) {
   // Fetch all current rules
-  const existing = await getDistributorRules(distributorId);
+  const existing = await getQuickNodeRules(distributorId);
 
   // Convert to a map: key => { uuid, value }
   const existingMap = new Map<string, { uuid: string; value: any }>(
@@ -83,7 +85,7 @@ async function syncDistributorRules(
     const ex = existingMap.get(key);
     if (!ex || ex.value !== value) {
       console.log(`${ex ? "Updating" : "Creating"} rule: ${key} = ${value}`);
-      await setRule(distributorId, key as DistributorRuleKey, value);
+      await setRule(distributorId, key as QuickNodeRuleKey, value);
     }
   }
 
@@ -91,7 +93,7 @@ async function syncDistributorRules(
 }
 
 // --- Run ---
-syncDistributorRules(distributorId, RULES).catch((e) => {
+syncQuickNodeRules(distributorId, RULES).catch((e) => {
   console.error("Failed to sync rules:", e.message || e);
   process.exit(2);
 });

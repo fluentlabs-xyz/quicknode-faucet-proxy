@@ -1,5 +1,12 @@
-pg_data
+pgdata
 node_modules
 dist
 .env
 nft
+logs
+
+script
+config
+secret
+
+.vscode
