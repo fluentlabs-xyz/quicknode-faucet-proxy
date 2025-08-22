@@ -13,6 +13,11 @@ const sql = postgres(Bun.env.DATABASE_URL!, {
   connect_timeout: 10,
 });
 
+// Type for query results
+interface ClaimRecord {
+  created_at: Date;
+}
+
 /**
  * Ensure database is ready
  */
@@ -33,9 +38,19 @@ export async function ensureDatabase(): Promise<void> {
       )
     `;
 
-    // Create indexes for common queries
-    await sql`CREATE INDEX IF NOT EXISTS idx_claims_wallet ON claims(external_wallet, distributor_id)`;
-    await sql`CREATE INDEX IF NOT EXISTS idx_claims_created ON claims(created_at)`;
+    // Create only necessary indexes
+
+    // Time-based queries index
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_claims_created 
+      ON claims(created_at)
+    `;
+
+    // Composite index for all wallet-based queries (covers both simple and weekly-limit queries)
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_claims_external_wallet_distributor_created_lower 
+      ON claims(LOWER(external_wallet), distributor_id, created_at DESC)
+    `;
 
     log.info("Database ready", "database");
   } catch (error) {
@@ -46,16 +61,18 @@ export async function ensureDatabase(): Promise<void> {
 
 /**
  * Database queries - simple and direct
+ * All queries use LOWER() for backward compatibility with existing mixed-case data
  */
 export const queries = {
-  // Check if wallet already claimed
+  // Check if wallet already claimed (for once-only validator)
+  // Uses LOWER() to handle both old mixed-case and new lowercase addresses
   async checkExistingClaim(
-    wallet: string,
+    externalWallet: string,
     distributorId: string
   ): Promise<boolean> {
     const [result] = await sql`
       SELECT 1 FROM claims 
-      WHERE external_wallet = ${wallet} 
+      WHERE LOWER(external_wallet) = LOWER(${externalWallet}) 
       AND distributor_id = ${distributorId}
       LIMIT 1
     `;
@@ -63,18 +80,35 @@ export const queries = {
   },
 
   // Check last claim time for rate limiting
+  // Uses LOWER() for case-insensitive comparison
   async getLastClaimTime(
-    wallet: string,
+    externalWallet: string,
     distributorId: string
   ): Promise<Date | null> {
     const [result] = await sql`
       SELECT created_at FROM claims 
-      WHERE external_wallet = ${wallet}
+      WHERE LOWER(external_wallet) = LOWER(${externalWallet})
       AND distributor_id = ${distributorId}
       ORDER BY created_at DESC
       LIMIT 1
     `;
     return result?.created_at || null;
+  },
+
+  // Get recent claims for weekly limit check
+  // Uses LOWER() for case-insensitive comparison
+  async getRecentClaims(
+    externalWallet: string,
+    distributorId: string,
+    since: Date
+  ): Promise<ClaimRecord[]> {
+    return await sql<ClaimRecord[]>`
+      SELECT created_at FROM claims 
+      WHERE LOWER(external_wallet) = LOWER(${externalWallet})
+      AND distributor_id = ${distributorId}
+      AND created_at >= ${since}
+      ORDER BY created_at DESC
+    `;
   },
 
   // Insert new claim
@@ -98,8 +132,8 @@ export const queries = {
         amount
       ) VALUES (
         ${claim.distributorId},
-        ${claim.embeddedWallet},
-        ${claim.externalWallet},
+        ${claim.embeddedWallet.toLowerCase()},
+        ${claim.externalWallet.toLowerCase()},
         ${claim.visitorId},
         ${claim.ip},
         ${claim.txId},
