@@ -67,6 +67,23 @@ const NFTConfigSchema = z.object({
   rpcUrl: z.url("RPC URL must be a valid URL"),
 });
 
+const WeeklyLimitSchema = z
+  .object({
+    maxClaimsPerWeek: z.number().int().min(1).max(10).default(3),
+    cooldownHours: z.number().min(1).max(168).default(24),
+  })
+  .refine(
+    (data) => {
+      const minTimeBetweenAllClaims =
+        data.cooldownHours * (data.maxClaimsPerWeek - 1);
+      return minTimeBetweenAllClaims <= 168;
+    },
+    {
+      message:
+        "Invalid configuration: cooldown * (maxClaims-1) cannot exceed 168 hours",
+    }
+  );
+
 export class Distributor {
   // Para config - MANDATORY for security
   private paraConfig?: {
@@ -82,6 +99,11 @@ export class Distributor {
     contractAddress: string;
     tokenId: string;
     rpcUrl: string;
+  };
+
+  private weeklyLimitConfig?: {
+    maxClaimsPerWeek: number;
+    cooldownHours: number;
   };
 
   // NFT client (lazy initialized)
@@ -102,6 +124,7 @@ export class Distributor {
       path: cfg.path,
       paraEnabled: !!this.paraConfig,
       onceOnlyEnabled: this.onceOnlyEnabled,
+      weeklyLimitEnabled: !!this.weeklyLimitConfig,
       nftEnabled: !!this.nftConfig,
     });
   }
@@ -134,6 +157,11 @@ export class Distributor {
     // Parse NFT config
     if (configs["nft-ownership"]) {
       this.nftConfig = NFTConfigSchema.parse(configs["nft-ownership"]);
+    }
+
+    // Parse weekly-limit config
+    if (configs["weekly-limit"]) {
+      this.weeklyLimitConfig = WeeklyLimitSchema.parse(configs["weekly-limit"]);
     }
   }
 
@@ -185,12 +213,17 @@ export class Distributor {
         await this.validateOnceOnly(externalWallet, requestId);
       }
 
-      // Step 3: Check NFT ownership if configured
+      // Step 3: Check weekly limit if enabled
+      if (this.weeklyLimitConfig) {
+        await this.validateWeeklyLimit(externalWallet, requestId);
+      }
+
+      // Step 4: Check NFT ownership if configured
       if (this.nftConfig) {
         await this.validateNftOwnership(externalWallet, requestId);
       }
 
-      // Step 4: Submit claim to QuickNode
+      // Step 5: Submit claim to QuickNode
       const response = await quickNodeService.submitClaim(
         this.cfg.distributorApiKey,
         {
@@ -205,7 +238,7 @@ export class Distributor {
         throw new Error(response.message || "Claim rejected by QuickNode");
       }
 
-      // Step 5: Record successful claim in database
+      // Step 6: Record successful claim in database
       await queries.insertClaim({
         distributorId: this.cfg.distributorId,
         embeddedWallet,
@@ -361,17 +394,6 @@ export class Distributor {
     }
 
     try {
-      const balanceEth = await this.nftClient.getBalance({
-        address: walletAddress as `0x${string}`,
-      });
-      console.log("tokenID", this.nftConfig.tokenId);
-      console.log("walletAddress", walletAddress);
-      console.log("balance: ", balanceEth);
-      console.log(
-        "this.nftConfig.contractAddress: ",
-        this.nftConfig.contractAddress
-      );
-
       const balance = await this.nftClient.readContract({
         address: this.nftConfig.contractAddress as `0x${string}`,
         abi: ERC1155_ABI,
@@ -403,6 +425,74 @@ export class Distributor {
           error instanceof Error ? error.message : "Unknown error"
         }`
       );
+    }
+  }
+
+  private async validateWeeklyLimit(
+    walletAddress: string,
+    requestId?: string
+  ): Promise<void> {
+    if (!this.weeklyLimitConfig) return;
+
+    const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+    const recentClaims = await queries.getRecentClaims(
+      walletAddress,
+      this.cfg.distributorId,
+      weekAgo
+    );
+
+    // First claim this week - allowed
+    if (recentClaims.length === 0) {
+      if (requestId) {
+        log.debug(
+          "Weekly limit validation passed - first claim",
+          "distributor",
+          requestId
+        );
+      }
+      return;
+    }
+
+    if (recentClaims.length >= this.weeklyLimitConfig.maxClaimsPerWeek) {
+      const oldestClaim = recentClaims[recentClaims.length - 1];
+      if (!oldestClaim) return;
+
+      const oldestClaimTime = new Date(oldestClaim.created_at).getTime();
+      const slotOpensAt = oldestClaimTime + 7 * 24 * 60 * 60 * 1000;
+      const msUntilSlotOpens = slotOpensAt - Date.now();
+
+      if (msUntilSlotOpens > 0) {
+        const hoursUntilSlot = Math.ceil(msUntilSlotOpens / (1000 * 60 * 60));
+        throw new Error(
+          `Weekly limit reached (${recentClaims.length}/${this.weeklyLimitConfig.maxClaimsPerWeek}). ` +
+            `Next slot opens in ${hoursUntilSlot}h`
+        );
+      }
+    }
+
+    const lastClaim = recentClaims[0];
+    if (!lastClaim) return;
+
+    const lastClaimTime = new Date(lastClaim.created_at).getTime();
+    const hoursSinceLastClaim = (Date.now() - lastClaimTime) / (1000 * 60 * 60);
+
+    if (hoursSinceLastClaim < this.weeklyLimitConfig.cooldownHours) {
+      const hoursRemaining = Math.ceil(
+        this.weeklyLimitConfig.cooldownHours - hoursSinceLastClaim
+      );
+      throw new Error(
+        `Cooldown active: wait ${hoursRemaining}h before next claim`
+      );
+    }
+
+    if (requestId) {
+      log.debug("Weekly limit validation passed", "distributor", requestId, {
+        claimsThisWeek: recentClaims.length,
+        maxPerWeek: this.weeklyLimitConfig.maxClaimsPerWeek,
+        hoursSinceLastClaim: Math.floor(hoursSinceLastClaim),
+        cooldownHours: this.weeklyLimitConfig.cooldownHours,
+      });
     }
   }
 }
