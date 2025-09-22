@@ -1,6 +1,6 @@
 import axios from "axios";
 const PARTNER_API_KEY = Bun.env.PARTNER_API_KEY!;
-const API_URL = Bun.env.FAUCET_API_URL;
+const API_URL = Bun.env.QUICKNODE_API_URL;
 const distributorId = process.argv[2];
 
 if (!distributorId) {

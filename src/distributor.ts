@@ -1,10 +1,11 @@
-import type { ClaimRequest, ClaimResult, GlobalConfig } from "./types";
-import { quickNodeService } from "./quicknode";
+import z from "zod";
 import { queries } from "./db";
 import { log } from "./logger";
+import { quickNodeService } from "./quicknode";
+import type { ClaimRequest, ClaimResult, GlobalConfig } from "./types";
 import { validateParaJwt } from "./utils/jwtValidator";
-import { createPublicClient, http, parseAbi } from "viem";
-import z from "zod";
+import { NFTOwnershipValidator } from "./validators/nft";
+import { OnceOnlyValidator, TimeLimitValidator } from "./validators/time";
 
 export async function createDistributors(
   configPath: string
@@ -16,17 +17,15 @@ export async function createDistributors(
     configFile.replace(/\$\{([^}]+)\}/g, (_, key) => Bun.env[key] || "")
   );
 
-  // Now path is the key in config.distributors
   for (const [path, distConfig] of Object.entries(config.distributors)) {
     const distributor = new Distributor({
-      path, // path from the key
+      path,
       distributorId: distConfig.distributorId,
       distributorApiKey: distConfig.distributorApiKey,
       dripAmount: distConfig.dripAmount,
       validatorConfigs: distConfig.validators,
     });
 
-    // Use path as the key in the Map for routing
     distributors.set(path, distributor);
   }
 
@@ -46,86 +45,34 @@ export interface DistributorConfig {
   validatorConfigs?: Record<string, Record<string, unknown>>;
 }
 
-const ERC1155_ABI = parseAbi([
-  "function balanceOf(address account, uint256 id) view returns (uint256)",
-]);
-
 const ParaConfigSchema = z.object({
   paraJwksUrl: z.url("Para JWKS URL must be a valid URL"),
   paraVerifyUrl: z.url("Para Verify URL must be a valid URL"),
   paraSecretKey: z.string().min(1, "Para Secret Key is required"),
 });
 
-const NFTConfigSchema = z.object({
-  contractAddress: z
-    .string()
-    .regex(
-      /^0x[a-fA-F0-9]{40}$/,
-      "Contract address must be a valid Ethereum address"
-    ),
-  tokenId: z.string().min(1, "Token ID is required"),
-  rpcUrl: z.url("RPC URL must be a valid URL"),
-});
-
-const WeeklyLimitSchema = z
-  .object({
-    maxClaimsPerWeek: z.number().int().min(1).max(10).default(3),
-    cooldownHours: z.number().min(1).max(168).default(24),
-  })
-  .refine(
-    (data) => {
-      const minTimeBetweenAllClaims =
-        data.cooldownHours * (data.maxClaimsPerWeek - 1);
-      return minTimeBetweenAllClaims <= 168;
-    },
-    {
-      message:
-        "Invalid configuration: cooldown * (maxClaims-1) cannot exceed 168 hours",
-    }
-  );
-
 export class Distributor {
-  // Para config - MANDATORY for security
   private paraConfig?: {
     paraJwksUrl: string;
     paraVerifyUrl: string;
     paraSecretKey: string;
   };
+  private isDirect = false;
 
-  // Optional validator configs
-  private onceOnlyEnabled: boolean = false;
-
-  private nftConfig?: {
-    contractAddress: string;
-    tokenId: string;
-    rpcUrl: string;
-  };
-
-  private weeklyLimitConfig?: {
-    maxClaimsPerWeek: number;
-    cooldownHours: number;
-  };
-
-  // NFT client (lazy initialized)
-  private nftClient?: ReturnType<typeof createPublicClient>;
+  // Validators
+  private timeLimitValidator?: TimeLimitValidator;
+  private onceOnlyValidator?: OnceOnlyValidator;
+  private nftValidator?: NFTOwnershipValidator;
 
   constructor(private readonly cfg: DistributorConfig) {
     this.parseValidatorConfigs();
 
-    // Para validation is MANDATORY - fail fast if not configured
-    if (!this.paraConfig) {
-      throw new Error(
-        `Para validation is required for distributor "${cfg.path}". ` +
-          `Security requires wallet addresses from verified JWT tokens.`
-      );
-    }
-
     log.info("Distributor initialized", "distributor", undefined, {
       path: cfg.path,
-      paraEnabled: !!this.paraConfig,
-      onceOnlyEnabled: this.onceOnlyEnabled,
-      weeklyLimitEnabled: !!this.weeklyLimitConfig,
-      nftEnabled: !!this.nftConfig,
+      mode: this.isDirect ? "direct" : "para",
+      onceOnlyEnabled: !!this.onceOnlyValidator,
+      timeLimitEnabled: !!this.timeLimitValidator,
+      nftEnabled: !!this.nftValidator,
     });
   }
 
@@ -139,33 +86,63 @@ export class Distributor {
 
   private parseValidatorConfigs(): void {
     if (!this.cfg.validatorConfigs) {
-      return;
+      throw new Error(`No validator configs for ${this.cfg.path}`);
     }
 
     const configs = this.cfg.validatorConfigs;
 
-    // Parse Para config (mandatory)
+    // Exactly one wallet source must be configured
+    if (configs["para-account"] && configs["direct"]) {
+      throw new Error(
+        `Conflicting configs: "para-account" and "direct" cannot both be enabled`
+      );
+    }
+    if (!configs["para-account"] && !configs["direct"]) {
+      throw new Error(`One of "para-account" or "direct" must be configured`);
+    }
+
+    // Parse wallet source
     if (configs["para-account"]) {
       this.paraConfig = ParaConfigSchema.parse(configs["para-account"]);
     }
 
-    // Parse once-only config
+    if (configs["direct"]) {
+      this.isDirect = true;
+    }
+
+    // Create validators
     if (configs["once-only"]) {
-      this.onceOnlyEnabled = true;
+      this.onceOnlyValidator = new OnceOnlyValidator();
     }
 
-    // Parse NFT config
-    if (configs["nft-ownership"]) {
-      this.nftConfig = NFTConfigSchema.parse(configs["nft-ownership"]);
-    }
-
-    // Parse weekly-limit config
+    // Support both old "weekly-limit" and new "time-limit" configs
     if (configs["weekly-limit"]) {
-      this.weeklyLimitConfig = WeeklyLimitSchema.parse(configs["weekly-limit"]);
+      const oldConfig = configs["weekly-limit"] as any;
+      this.timeLimitValidator = new TimeLimitValidator({
+        period: "week",
+        maxClaims: oldConfig.maxClaimsPerWeek || 3,
+        cooldownHours: oldConfig.cooldownHours || 24,
+      });
+    } else if (configs["time-limit"]) {
+      this.timeLimitValidator = new TimeLimitValidator(configs["time-limit"]);
+    }
+
+    if (configs["nft-ownership"]) {
+      this.nftValidator = new NFTOwnershipValidator(configs["nft-ownership"]);
     }
   }
 
   async parseRequestFromBody(
+    body: unknown,
+    headers: Headers
+  ): Promise<ClaimRequest> {
+    if (this.isDirect) {
+      return this.parseDirectRequestFromBody(body, headers);
+    }
+    return this.parseParaRequestFromBody(body, headers);
+  }
+
+  private parseParaRequestFromBody(
     body: unknown,
     headers: Headers
   ): Promise<ClaimRequest> {
@@ -175,7 +152,6 @@ export class Distributor {
       throw new Error("Missing visitorId");
     }
 
-    // Extract JWT token from Authorization header
     const authHeader = headers.get("authorization");
     const token = authHeader?.startsWith("Bearer ")
       ? authHeader.slice(7)
@@ -185,45 +161,89 @@ export class Distributor {
       throw new Error("Authorization token is required");
     }
 
-    return {
+    return Promise.resolve({
       visitorId: rawBody.visitorId as string,
-      clientIp:
-        headers.get("cf-connecting-ip") ||
-        headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-        headers.get("x-real-ip") ||
-        "",
+      clientIp: this.extractClientIP(headers),
       token,
       ...rawBody,
-    };
+    });
+  }
+
+  private parseDirectRequestFromBody(
+    body: unknown,
+    headers: Headers
+  ): Promise<ClaimRequest> {
+    const rawBody = body as Record<string, unknown>;
+
+    if (!rawBody?.visitorId) {
+      throw new Error("Missing visitorId");
+    }
+
+    const walletAddress = rawBody.walletAddress as string;
+    if (!walletAddress || !/^0x[a-fA-F0-9]{40}$/i.test(walletAddress)) {
+      throw new Error("Invalid or missing wallet address");
+    }
+
+    return Promise.resolve({
+      visitorId: rawBody.visitorId as string,
+      clientIp: this.extractClientIP(headers),
+      walletAddress: walletAddress as `0x${string}`,
+      ...rawBody,
+    });
+  }
+
+  private extractClientIP(headers: Headers): string {
+    return (
+      headers.get("cf-connecting-ip") ||
+      headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+      headers.get("x-real-ip") ||
+      ""
+    );
   }
 
   async processClaim(
     request: ClaimRequest,
     requestId?: string
   ): Promise<ClaimResult> {
+    if (this.isDirect) {
+      return this.processDirectClaim(request, requestId);
+    }
+    return this.processParaClaim(request, requestId);
+  }
+
+  private async processParaClaim(
+    request: ClaimRequest,
+    requestId?: string
+  ): Promise<ClaimResult> {
     try {
-      // Step 1: Para validation - extract wallet addresses from JWT
+      // Extract wallet addresses from JWT
       const { embeddedWallet, externalWallet } = await this.validateParaAccount(
         request.token as string,
         requestId
       );
 
-      // Step 2: Check once-only constraint if enabled
-      if (this.onceOnlyEnabled) {
-        await this.validateOnceOnly(externalWallet, requestId);
+      // Run validators
+      if (this.onceOnlyValidator) {
+        await this.onceOnlyValidator.validate(
+          externalWallet,
+          this.cfg.distributorId,
+          requestId
+        );
       }
 
-      // Step 3: Check weekly limit if enabled
-      if (this.weeklyLimitConfig) {
-        await this.validateWeeklyLimit(externalWallet, requestId);
+      if (this.timeLimitValidator) {
+        await this.timeLimitValidator.validate(
+          externalWallet,
+          this.cfg.distributorId,
+          requestId
+        );
       }
 
-      // Step 4: Check NFT ownership if configured
-      if (this.nftConfig) {
-        await this.validateNftOwnership(externalWallet, requestId);
+      if (this.nftValidator) {
+        await this.nftValidator.validate(externalWallet, requestId);
       }
 
-      // Step 5: Submit claim to QuickNode
+      // Submit claim to QuickNode
       const response = await quickNodeService.submitClaim(
         this.cfg.distributorApiKey,
         {
@@ -238,7 +258,7 @@ export class Distributor {
         throw new Error(response.message || "Claim rejected by QuickNode");
       }
 
-      // Step 6: Record successful claim in database
+      // Record successful claim in database
       await queries.insertClaim({
         distributorId: this.cfg.distributorId,
         embeddedWallet,
@@ -267,9 +287,84 @@ export class Distributor {
     }
   }
 
+  private async processDirectClaim(
+    request: ClaimRequest,
+    requestId?: string
+  ): Promise<ClaimResult> {
+    try {
+      // Extract wallet address from request
+      const walletAddress = request.walletAddress;
+      if (!walletAddress) {
+        throw new Error("Wallet address is required in direct mode");
+      }
+
+      // Run validators
+      if (this.onceOnlyValidator) {
+        await this.onceOnlyValidator.validate(
+          walletAddress,
+          this.cfg.distributorId,
+          requestId
+        );
+      }
+
+      if (this.timeLimitValidator) {
+        await this.timeLimitValidator.validate(
+          walletAddress,
+          this.cfg.distributorId,
+          requestId
+        );
+      }
+
+      if (this.nftValidator) {
+        await this.nftValidator.validate(walletAddress, requestId);
+      }
+
+      // Submit claim to QuickNode
+      const response = await quickNodeService.submitClaim(
+        this.cfg.distributorApiKey,
+        {
+          address: walletAddress,
+          ip: request.clientIp,
+          visitorId: request.visitorId,
+        },
+        requestId
+      );
+
+      if (!response.success) {
+        throw new Error(response.message || "Claim rejected by QuickNode");
+      }
+
+      // Record successful claim in database
+      await queries.insertClaim({
+        distributorId: this.cfg.distributorId,
+        embeddedWallet: walletAddress,
+        externalWallet: walletAddress,
+        visitorId: request.visitorId,
+        ip: request.clientIp,
+        txId: response.transactionId || null,
+        amount: this.cfg.dripAmount,
+      });
+
+      return {
+        success: true,
+        transactionId: response.transactionId || "",
+        amount: this.cfg.dripAmount,
+        message: "Claim processed successfully",
+      };
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Claim processing failed";
+
+      if (requestId) {
+        log.info("Claim failed", "distributor", requestId, { error: message });
+      }
+
+      return { success: false, error: message };
+    }
+  }
+
   /**
    * Validate Para JWT and extract wallet addresses
-   * This is MANDATORY - we only trust wallets from verified JWT tokens
    */
   private async validateParaAccount(
     token: string | undefined,
@@ -280,24 +375,19 @@ export class Distributor {
     }
 
     if (!this.paraConfig) {
-      throw new Error("Para validation not configured but is required");
+      throw new Error("Para validation not configured");
     }
 
-    // Validate JWT signature and expiration
     const jwtResult = await validateParaJwt(token, this.paraConfig.paraJwksUrl);
 
     if (!jwtResult.valid) {
       throw new Error(`Invalid token: ${jwtResult.error}`);
     }
 
-    // Extract wallet addresses from JWT payload
     const payload = jwtResult.payload;
     const data = payload.data;
 
-    // Get embedded wallet (Para wallet)
     const embeddedWallet = data.wallets?.[0]?.address;
-
-    // Get external wallet
     const externalWallet = data.externalWallets?.[0]?.address;
 
     if (!embeddedWallet) {
@@ -308,7 +398,6 @@ export class Distributor {
       throw new Error("No external wallet addresses found in Para token");
     }
 
-    // Verify with Para project API
     await this.verifyParaProject(embeddedWallet);
 
     if (requestId) {
@@ -322,9 +411,6 @@ export class Distributor {
     return { embeddedWallet, externalWallet };
   }
 
-  /**
-   * Verify wallet with Para project API
-   */
   private async verifyParaProject(address: string): Promise<void> {
     if (!this.paraConfig) return;
 
@@ -346,153 +432,6 @@ export class Distributor {
       throw new Error(
         `Para wallet verification failed: ${resp.status} ${resp.statusText}`
       );
-    }
-  }
-
-  /**
-   * Check if wallet has already claimed (once-only validation)
-   */
-  private async validateOnceOnly(
-    walletAddress: string,
-    requestId?: string
-  ): Promise<void> {
-    const existingClaim = await queries.checkExistingClaim(
-      walletAddress,
-      this.cfg.distributorId
-    );
-
-    if (existingClaim) {
-      throw new Error(
-        `This wallet has already claimed from this faucet. Only one claim is allowed per wallet.`
-      );
-    }
-
-    if (requestId) {
-      log.debug("Once-only validation passed", "distributor", requestId);
-    }
-  }
-
-  /**
-   * Verify NFT ownership for the wallet
-   */
-  private async validateNftOwnership(
-    walletAddress: string,
-    requestId?: string
-  ): Promise<void> {
-    if (!this.nftConfig) return;
-
-    // Validate wallet address format
-    if (!/^0x[a-fA-F0-9]{40}$/.test(walletAddress)) {
-      throw new Error("Invalid wallet address format for NFT verification");
-    }
-
-    // Initialize NFT client if needed
-    if (!this.nftClient) {
-      this.nftClient = createPublicClient({
-        transport: http(this.nftConfig.rpcUrl),
-      });
-    }
-
-    try {
-      const balance = await this.nftClient.readContract({
-        address: this.nftConfig.contractAddress as `0x${string}`,
-        abi: ERC1155_ABI,
-        functionName: "balanceOf",
-        args: [walletAddress as `0x${string}`, BigInt(this.nftConfig.tokenId)],
-      });
-
-      if (BigInt(balance) === 0n) {
-        throw new Error(
-          `NFT ownership validation failed. Required token ID ${this.nftConfig.tokenId} not owned.`
-        );
-      }
-
-      if (requestId) {
-        log.debug("NFT ownership validated", "distributor", requestId, {
-          walletAddress,
-          tokenId: this.nftConfig.tokenId,
-          balance: balance.toString(),
-        });
-      }
-    } catch (error) {
-      if (error instanceof Error && error.message.includes("NFT ownership")) {
-        throw error; // Re-throw our own error
-      }
-
-      // Wrap contract errors
-      throw new Error(
-        `NFT validation failed: ${
-          error instanceof Error ? error.message : "Unknown error"
-        }`
-      );
-    }
-  }
-
-  private async validateWeeklyLimit(
-    walletAddress: string,
-    requestId?: string
-  ): Promise<void> {
-    if (!this.weeklyLimitConfig) return;
-
-    const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-
-    const recentClaims = await queries.getRecentClaims(
-      walletAddress,
-      this.cfg.distributorId,
-      weekAgo
-    );
-
-    // First claim this week - allowed
-    if (recentClaims.length === 0) {
-      if (requestId) {
-        log.debug(
-          "Weekly limit validation passed - first claim",
-          "distributor",
-          requestId
-        );
-      }
-      return;
-    }
-
-    if (recentClaims.length >= this.weeklyLimitConfig.maxClaimsPerWeek) {
-      const oldestClaim = recentClaims[recentClaims.length - 1];
-      if (!oldestClaim) return;
-
-      const oldestClaimTime = new Date(oldestClaim.created_at).getTime();
-      const slotOpensAt = oldestClaimTime + 7 * 24 * 60 * 60 * 1000;
-      const msUntilSlotOpens = slotOpensAt - Date.now();
-
-      if (msUntilSlotOpens > 0) {
-        const hoursUntilSlot = Math.ceil(msUntilSlotOpens / (1000 * 60 * 60));
-        throw new Error(
-          `Weekly limit reached (${recentClaims.length}/${this.weeklyLimitConfig.maxClaimsPerWeek}). ` +
-            `Next slot opens in ${hoursUntilSlot}h`
-        );
-      }
-    }
-
-    const lastClaim = recentClaims[0];
-    if (!lastClaim) return;
-
-    const lastClaimTime = new Date(lastClaim.created_at).getTime();
-    const hoursSinceLastClaim = (Date.now() - lastClaimTime) / (1000 * 60 * 60);
-
-    if (hoursSinceLastClaim < this.weeklyLimitConfig.cooldownHours) {
-      const hoursRemaining = Math.ceil(
-        this.weeklyLimitConfig.cooldownHours - hoursSinceLastClaim
-      );
-      throw new Error(
-        `Cooldown active: wait ${hoursRemaining}h before next claim`
-      );
-    }
-
-    if (requestId) {
-      log.debug("Weekly limit validation passed", "distributor", requestId, {
-        claimsThisWeek: recentClaims.length,
-        maxPerWeek: this.weeklyLimitConfig.maxClaimsPerWeek,
-        hoursSinceLastClaim: Math.floor(hoursSinceLastClaim),
-        cooldownHours: this.weeklyLimitConfig.cooldownHours,
-      });
     }
   }
 }

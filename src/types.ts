@@ -26,6 +26,8 @@ export interface ClaimRequest {
   visitorId: string;
   // Optional para jwt token used for para wallet verification
   token?: string;
+  // optional wallet address for the direct implementation
+  walletAddress?: `0x${string}`
   [key: string]: unknown;
 }
 
