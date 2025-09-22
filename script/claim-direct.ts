@@ -1,4 +1,3 @@
-// script/claim-direct.ts
 import axios from "axios";
 
 const [walletAddress, visitorId, ip] = process.argv.slice(2);
