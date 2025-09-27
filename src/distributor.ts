@@ -2,10 +2,16 @@ import z from "zod";
 import { queries } from "./db";
 import { log } from "./logger";
 import { quickNodeService } from "./quicknode";
-import type { ClaimRequest, ClaimResult, GlobalConfig } from "./types";
+import type {
+  ClaimRequest,
+  ClaimResult,
+  DistributorConfig,
+  GlobalConfig,
+} from "./types";
 import { validateParaJwt } from "./utils/jwtValidator";
 import { NFTOwnershipValidator } from "./validators/nft";
 import { OnceOnlyValidator, TimeLimitValidator } from "./validators/time";
+import { ERC20TokenService } from "./erc20";
 
 export async function createDistributors(
   configPath: string
@@ -23,7 +29,8 @@ export async function createDistributors(
       distributorId: distConfig.distributorId,
       distributorApiKey: distConfig.distributorApiKey,
       dripAmount: distConfig.dripAmount,
-      validatorConfigs: distConfig.validators,
+      validators: distConfig.validators,
+      erc20Config: distConfig.erc20Config,
     });
 
     distributors.set(path, distributor);
@@ -35,14 +42,6 @@ export async function createDistributors(
   });
 
   return distributors;
-}
-
-export interface DistributorConfig {
-  path: string;
-  distributorId: string;
-  distributorApiKey: string;
-  dripAmount: number;
-  validatorConfigs?: Record<string, Record<string, unknown>>;
 }
 
 const ParaConfigSchema = z.object({
@@ -64,8 +63,16 @@ export class Distributor {
   private onceOnlyValidator?: OnceOnlyValidator;
   private nftValidator?: NFTOwnershipValidator;
 
+  // ERC20 service
+  private erc20Service?: ERC20TokenService;
+
   constructor(private readonly cfg: DistributorConfig) {
     this.parseValidatorConfigs();
+
+    // Initialize ERC20 service if configured
+    if (cfg.erc20Config) {
+      this.erc20Service = new ERC20TokenService(cfg.erc20Config);
+    }
 
     log.info("Distributor initialized", "distributor", undefined, {
       path: cfg.path,
@@ -73,6 +80,7 @@ export class Distributor {
       onceOnlyEnabled: !!this.onceOnlyValidator,
       timeLimitEnabled: !!this.timeLimitValidator,
       nftEnabled: !!this.nftValidator,
+      erc20Enabled: !!this.erc20Service,
     });
   }
 
@@ -85,11 +93,11 @@ export class Distributor {
   }
 
   private parseValidatorConfigs(): void {
-    if (!this.cfg.validatorConfigs) {
+    if (!this.cfg.validators) {
       throw new Error(`No validator configs for ${this.cfg.path}`);
     }
 
-    const configs = this.cfg.validatorConfigs;
+    const configs = this.cfg.validators;
 
     // Exactly one wallet source must be configured
     if (configs["para-account"] && configs["direct"]) {
@@ -258,6 +266,30 @@ export class Distributor {
         throw new Error(response.message || "Claim rejected by QuickNode");
       }
 
+      // Transfer ERC20 tokens if configured
+      let erc20TxHash: string | undefined;
+      if (this.erc20Service) {
+        const erc20Result = await this.erc20Service.transferTokens(
+          embeddedWallet,
+          requestId
+        );
+
+        if (!erc20Result.success) {
+          // Log error but don't fail the entire claim
+          log.error(
+            "ERC20 transfer failed after successful QuickNode claim",
+            "distributor",
+            requestId,
+            erc20Result.error,
+            {
+              wallet: embeddedWallet,
+            }
+          );
+        } else {
+          erc20TxHash = erc20Result.txHash;
+        }
+      }
+
       // Record successful claim in database
       await queries.insertClaim({
         distributorId: this.cfg.distributorId,
@@ -267,6 +299,7 @@ export class Distributor {
         ip: request.clientIp,
         txId: response.transactionId || null,
         amount: this.cfg.dripAmount,
+        erc20TxId: erc20TxHash || null,
       });
 
       return {
@@ -274,6 +307,7 @@ export class Distributor {
         transactionId: response.transactionId || "",
         amount: this.cfg.dripAmount,
         message: "Claim processed successfully",
+        erc20TxID: erc20TxHash,
       };
     } catch (error) {
       const message =
@@ -334,6 +368,30 @@ export class Distributor {
         throw new Error(response.message || "Claim rejected by QuickNode");
       }
 
+      // Transfer ERC20 tokens if configured
+      let erc20TxHash: string | undefined;
+      if (this.erc20Service) {
+        const erc20Result = await this.erc20Service.transferTokens(
+          walletAddress,
+          requestId
+        );
+
+        if (!erc20Result.success) {
+          // Log error but don't fail the entire claim
+          log.error(
+            "ERC20 transfer failed after successful QuickNode claim",
+            "distributor",
+            requestId,
+            erc20Result.error,
+            {
+              wallet: walletAddress,
+            }
+          );
+        } else {
+          erc20TxHash = erc20Result.txHash;
+        }
+      }
+
       // Record successful claim in database
       await queries.insertClaim({
         distributorId: this.cfg.distributorId,
@@ -343,6 +401,7 @@ export class Distributor {
         ip: request.clientIp,
         txId: response.transactionId || null,
         amount: this.cfg.dripAmount,
+        erc20TxId: erc20TxHash || null,
       });
 
       return {
@@ -350,6 +409,7 @@ export class Distributor {
         transactionId: response.transactionId || "",
         amount: this.cfg.dripAmount,
         message: "Claim processed successfully",
+        erc20TxID: erc20TxHash,
       };
     } catch (error) {
       const message =

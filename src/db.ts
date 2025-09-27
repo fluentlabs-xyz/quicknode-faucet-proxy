@@ -1,4 +1,3 @@
-// src/database.ts - Ultra KISS version
 import postgres from "postgres";
 import { log } from "./logger";
 
@@ -12,11 +11,6 @@ const sql = postgres(Bun.env.DATABASE_URL!, {
   idle_timeout: 20,
   connect_timeout: 10,
 });
-
-// Type for query results
-interface ClaimRecord {
-  created_at: Date;
-}
 
 /**
  * Ensure database is ready
@@ -38,9 +32,15 @@ export async function ensureDatabase(): Promise<void> {
       )
     `;
 
-    // Create only necessary indexes
+    // Add ERC20 column - safe to run multiple times
+    await sql`
+      ALTER TABLE claims 
+      ADD COLUMN IF NOT EXISTS erc20_tx_id VARCHAR(128)
+    `.catch(() => {
+      // Column already exists in old Postgres - that's fine
+    });
 
-    // Time-based queries index
+    // Create indexes
     await sql`
       CREATE INDEX IF NOT EXISTS idx_claims_created 
       ON claims(created_at)
@@ -101,8 +101,8 @@ export const queries = {
     externalWallet: string,
     distributorId: string,
     since: Date
-  ): Promise<ClaimRecord[]> {
-    return await sql<ClaimRecord[]>`
+  ) {
+    return await sql`
       SELECT created_at FROM claims 
       WHERE LOWER(external_wallet) = LOWER(${externalWallet})
       AND distributor_id = ${distributorId}
@@ -120,6 +120,7 @@ export const queries = {
     ip: string;
     txId: string | null;
     amount: number;
+    erc20TxId?: string | null;
   }): Promise<void> {
     await sql`
       INSERT INTO claims (
@@ -129,7 +130,8 @@ export const queries = {
         visitor_id,
         ip,
         tx_id,
-        amount
+        amount,
+        erc20_tx_id
       ) VALUES (
         ${claim.distributorId},
         ${claim.embeddedWallet.toLowerCase()},
@@ -137,7 +139,8 @@ export const queries = {
         ${claim.visitorId},
         ${claim.ip},
         ${claim.txId},
-        ${claim.amount}
+        ${claim.amount},
+        ${claim.erc20TxId || null}
       )
     `;
   },

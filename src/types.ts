@@ -1,21 +1,27 @@
 export interface GlobalConfig {
   quicknode_api_url: string;
   distributors: {
-    [path: string]: {
-      // path is the key
-      kind?: string;
-      distributorId: string;
-      distributorApiKey: string;
-      name: string; // name is a field
-      dripAmount: number;
-      dripInterval?: string;
-      dripPerInterval?: number;
-      validators?: {
-        [validatorName: string]: Record<string, unknown>;
-      };
-    };
+    [path: string]: DistributorConfig;
   };
 }
+
+export interface DistributorConfig {
+  path: string;
+  distributorId: string;
+  distributorApiKey: string;
+  dripAmount: number;
+  validators?: Record<string, Record<string, unknown>>;
+  erc20Config?: ERC20Config; 
+}
+
+export interface ERC20Config {
+  tokenAddress: string;
+  amount: string; // Amount in human-readable format (e.g., "100.5")
+  privateKey: string;
+  rpcUrl: string;
+  chainId?: number;
+}
+
 /**
  * Claim request with flexible properties for validators
  */
@@ -27,7 +33,7 @@ export interface ClaimRequest {
   // Optional para jwt token used for para wallet verification
   token?: string;
   // optional wallet address for the direct implementation
-  walletAddress?: `0x${string}`
+  walletAddress?: `0x${string}`;
   [key: string]: unknown;
 }
 
@@ -39,6 +45,7 @@ export type ClaimResult =
       success: true;
       transactionId: string;
       amount: number;
+      erc20TxID?: string; 
       message?: string;
     }
   | {
