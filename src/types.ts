@@ -19,7 +19,7 @@ export interface ERC20Config {
   amount: string; // Amount in human-readable format (e.g., "100.5")
   privateKey: string;
   rpcUrl: string;
-  chainId?: number;
+  chainId: number;
 }
 
 /**

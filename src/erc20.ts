@@ -57,7 +57,7 @@ export class ERC20TokenService {
 
     // Setup chain (minimal chain object)
     this.chain = {
-      id: config.chainId || 1,
+      id: config.chainId,
       name: "EVM Chain",
       nativeCurrency: {
         name: "ETH",
