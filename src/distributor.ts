@@ -1,5 +1,6 @@
 import z from "zod";
-import { queries } from "./db";
+import { queries, type TransferRecord } from "./db";
+import { ERC20TokenService } from "./erc20";
 import { log } from "./logger";
 import { quickNodeService } from "./quicknode";
 import type {
@@ -11,7 +12,6 @@ import type {
 import { validateParaJwt } from "./utils/jwtValidator";
 import { NFTOwnershipValidator } from "./validators/nft";
 import { OnceOnlyValidator, TimeLimitValidator } from "./validators/time";
-import { ERC20TokenService } from "./erc20";
 
 export async function createDistributors(
   configPath: string
@@ -30,9 +30,9 @@ export async function createDistributors(
       distributorApiKey: distConfig.distributorApiKey,
       dripAmount: distConfig.dripAmount,
       validators: distConfig.validators,
-      erc20Config: distConfig.erc20Config,
+      erc20Configs: distConfig.erc20Configs,
     });
-
+    
     distributors.set(path, distributor);
   }
 
@@ -63,15 +63,17 @@ export class Distributor {
   private onceOnlyValidator?: OnceOnlyValidator;
   private nftValidator?: NFTOwnershipValidator;
 
-  // ERC20 service
-  private erc20Service?: ERC20TokenService;
+  // ERC20 services (multiple tokens)
+  private erc20Services: ERC20TokenService[] = [];
 
   constructor(private readonly cfg: DistributorConfig) {
     this.parseValidatorConfigs();
 
-    // Initialize ERC20 service if configured
-    if (cfg.erc20Config) {
-      this.erc20Service = new ERC20TokenService(cfg.erc20Config);
+    // Initialize ERC20 services if configured
+    if (cfg.erc20Configs) {
+      this.erc20Services = cfg.erc20Configs.map(
+        (c) => new ERC20TokenService(c)
+      );
     }
 
     log.info("Distributor initialized", "distributor", undefined, {
@@ -80,7 +82,7 @@ export class Distributor {
       onceOnlyEnabled: !!this.onceOnlyValidator,
       timeLimitEnabled: !!this.timeLimitValidator,
       nftEnabled: !!this.nftValidator,
-      erc20Enabled: !!this.erc20Service,
+      erc20TokensCount: this.erc20Services.length,
     });
   }
 
@@ -266,32 +268,45 @@ export class Distributor {
         throw new Error(response.message || "Claim rejected by QuickNode");
       }
 
-      // Transfer ERC20 tokens if configured
-      let erc20TxHash: string | undefined;
-      if (this.erc20Service) {
-        const erc20Result = await this.erc20Service.transferTokens(
-          embeddedWallet,
-          requestId
-        );
+      // Collect all transfers
+      const transfers: TransferRecord[] = [];
 
-        if (!erc20Result.success) {
-          // Log error but don't fail the entire claim
+      // Native token transfer
+      transfers.push({
+        tokenType: "native",
+        txHash: response.transactionId || null,
+        amount: this.cfg.dripAmount,
+        success: true,
+      });
+
+      // ERC20 token transfers
+      for (const service of this.erc20Services) {
+        const result = await service.transferTokens(embeddedWallet, requestId);
+        transfers.push({
+          tokenType: "erc20",
+          tokenAddress: service.getTokenAddress(),
+          txHash: result.txHash || null,
+          amount: service.getAmount(),
+          success: result.success,
+          error: result.error,
+        });
+
+        if (!result.success) {
           log.error(
             "ERC20 transfer failed after successful QuickNode claim",
             "distributor",
             requestId,
-            erc20Result.error,
+            result.error,
             {
               wallet: embeddedWallet,
+              token: service.getTokenAddress(),
             }
           );
-        } else {
-          erc20TxHash = erc20Result.txHash;
         }
       }
 
-      // Record successful claim in database
-      await queries.insertClaim({
+      // Record claim in database
+      const claimId = await queries.insertClaim({
         distributorId: this.cfg.distributorId,
         embeddedWallet,
         externalWallet,
@@ -299,15 +314,17 @@ export class Distributor {
         ip: request.clientIp,
         txId: response.transactionId || null,
         amount: this.cfg.dripAmount,
-        erc20TxId: erc20TxHash || null,
       });
+
+      // Record all transfers
+      await queries.insertTransfers(claimId, transfers);
 
       return {
         success: true,
         transactionId: response.transactionId || "",
         amount: this.cfg.dripAmount,
         message: "Claim processed successfully",
-        erc20TxID: erc20TxHash,
+        transfers,
       };
     } catch (error) {
       const message =
@@ -368,32 +385,45 @@ export class Distributor {
         throw new Error(response.message || "Claim rejected by QuickNode");
       }
 
-      // Transfer ERC20 tokens if configured
-      let erc20TxHash: string | undefined;
-      if (this.erc20Service) {
-        const erc20Result = await this.erc20Service.transferTokens(
-          walletAddress,
-          requestId
-        );
+      // Collect all transfers
+      const transfers: TransferRecord[] = [];
 
-        if (!erc20Result.success) {
-          // Log error but don't fail the entire claim
+      // Native token transfer
+      transfers.push({
+        tokenType: "native",
+        txHash: response.transactionId || null,
+        amount: this.cfg.dripAmount,
+        success: true,
+      });
+
+      // ERC20 token transfers
+      for (const service of this.erc20Services) {
+        const result = await service.transferTokens(walletAddress, requestId);
+        transfers.push({
+          tokenType: "erc20",
+          tokenAddress: service.getTokenAddress(),
+          txHash: result.txHash || null,
+          amount: service.getAmount(),
+          success: result.success,
+          error: result.error,
+        });
+
+        if (!result.success) {
           log.error(
             "ERC20 transfer failed after successful QuickNode claim",
             "distributor",
             requestId,
-            erc20Result.error,
+            result.error,
             {
               wallet: walletAddress,
+              token: service.getTokenAddress(),
             }
           );
-        } else {
-          erc20TxHash = erc20Result.txHash;
         }
       }
 
-      // Record successful claim in database
-      await queries.insertClaim({
+      // Record claim in database
+      const claimId = await queries.insertClaim({
         distributorId: this.cfg.distributorId,
         embeddedWallet: walletAddress,
         externalWallet: walletAddress,
@@ -401,15 +431,17 @@ export class Distributor {
         ip: request.clientIp,
         txId: response.transactionId || null,
         amount: this.cfg.dripAmount,
-        erc20TxId: erc20TxHash || null,
       });
+
+      // Record all transfers
+      await queries.insertTransfers(claimId, transfers);
 
       return {
         success: true,
         transactionId: response.transactionId || "",
         amount: this.cfg.dripAmount,
         message: "Claim processed successfully",
-        erc20TxID: erc20TxHash,
+        transfers,
       };
     } catch (error) {
       const message =

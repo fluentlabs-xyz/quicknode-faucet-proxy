@@ -1,3 +1,5 @@
+import type { TransferRecord } from './db';
+
 export interface GlobalConfig {
   quicknode_api_url: string;
   distributors: {
@@ -11,7 +13,7 @@ export interface DistributorConfig {
   distributorApiKey: string;
   dripAmount: number;
   validators?: Record<string, Record<string, unknown>>;
-  erc20Config?: ERC20Config; 
+  erc20Configs?: ERC20Config[]; 
 }
 
 export interface ERC20Config {
@@ -45,7 +47,7 @@ export type ClaimResult =
       success: true;
       transactionId: string;
       amount: number;
-      erc20TxID?: string; 
+      transfers: TransferRecord[];
       message?: string;
     }
   | {

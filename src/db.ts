@@ -17,7 +17,7 @@ const sql = postgres(Bun.env.DATABASE_URL!, {
  */
 export async function ensureDatabase(): Promise<void> {
   try {
-    // Create claims table if not exists
+    // Create claims table if not exists (unchanged)
     await sql`
       CREATE TABLE IF NOT EXISTS claims (
         id SERIAL PRIMARY KEY,
@@ -32,7 +32,7 @@ export async function ensureDatabase(): Promise<void> {
       )
     `;
 
-    // Add ERC20 column - safe to run multiple times
+    // Add ERC20 column - safe to run multiple times (legacy support)
     await sql`
       ALTER TABLE claims 
       ADD COLUMN IF NOT EXISTS erc20_tx_id VARCHAR(128)
@@ -40,16 +40,35 @@ export async function ensureDatabase(): Promise<void> {
       // Column already exists in old Postgres - that's fine
     });
 
-    // Create indexes
+    // Create indexes for claims
     await sql`
       CREATE INDEX IF NOT EXISTS idx_claims_created 
       ON claims(created_at)
     `;
 
-    // Composite index for all wallet-based queries (covers both simple and weekly-limit queries)
     await sql`
       CREATE INDEX IF NOT EXISTS idx_claims_external_wallet_distributor_created_lower 
       ON claims(LOWER(external_wallet), distributor_id, created_at DESC)
+    `;
+
+    // NEW: Create transfers table for multi-token support
+    await sql`
+      CREATE TABLE IF NOT EXISTS transfers (
+        id SERIAL PRIMARY KEY,
+        claim_id INTEGER NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
+        token_type VARCHAR(20) NOT NULL,
+        token_address VARCHAR(64),
+        tx_hash VARCHAR(128),
+        amount DECIMAL(36, 18) NOT NULL,
+        success BOOLEAN NOT NULL DEFAULT true,
+        error TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `;
+
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_transfers_claim_id 
+      ON transfers(claim_id)
     `;
 
     log.info("Database ready", "database");
@@ -60,12 +79,23 @@ export async function ensureDatabase(): Promise<void> {
 }
 
 /**
+ * Transfer record for inserting into transfers table
+ */
+export interface TransferRecord {
+  tokenType: "native" | "erc20";
+  tokenAddress?: string;
+  txHash: string | null;
+  amount: number | string;
+  success: boolean;
+  error?: string;
+}
+
+/**
  * Database queries - simple and direct
  * All queries use LOWER() for backward compatibility with existing mixed-case data
  */
 export const queries = {
   // Check if wallet already claimed (for once-only validator)
-  // Uses LOWER() to handle both old mixed-case and new lowercase addresses
   async checkExistingClaim(
     externalWallet: string,
     distributorId: string
@@ -80,7 +110,6 @@ export const queries = {
   },
 
   // Check last claim time for rate limiting
-  // Uses LOWER() for case-insensitive comparison
   async getLastClaimTime(
     externalWallet: string,
     distributorId: string
@@ -96,7 +125,6 @@ export const queries = {
   },
 
   // Get recent claims for weekly limit check
-  // Uses LOWER() for case-insensitive comparison
   async getRecentClaims(
     externalWallet: string,
     distributorId: string,
@@ -111,7 +139,7 @@ export const queries = {
     `;
   },
 
-  // Insert new claim
+  // Insert new claim (legacy fields kept for backward compatibility)
   async insertClaim(claim: {
     distributorId: string;
     embeddedWallet: string;
@@ -121,8 +149,8 @@ export const queries = {
     txId: string | null;
     amount: number;
     erc20TxId?: string | null;
-  }): Promise<void> {
-    await sql`
+  }): Promise<number> {
+    const [result] = await sql`
       INSERT INTO claims (
         distributor_id,
         embedded_wallet,
@@ -142,6 +170,50 @@ export const queries = {
         ${claim.amount},
         ${claim.erc20TxId || null}
       )
+      RETURNING id
+    `;
+
+    if (!result) {
+      throw new Error("Failed to insert claim");
+    }
+
+    return result.id;
+  },
+
+  // Insert transfer records for a claim
+  async insertTransfers(
+    claimId: number,
+    transfers: TransferRecord[]
+  ): Promise<void> {
+    for (const transfer of transfers) {
+      await sql`
+        INSERT INTO transfers (
+          claim_id,
+          token_type,
+          token_address,
+          tx_hash,
+          amount,
+          success,
+          error
+        ) VALUES (
+          ${claimId},
+          ${transfer.tokenType},
+          ${transfer.tokenAddress || null},
+          ${transfer.txHash},
+          ${transfer.amount},
+          ${transfer.success},
+          ${transfer.error || null}
+        )
+      `;
+    }
+  },
+
+  // Get transfers for a claim
+  async getClaimTransfers(claimId: number) {
+    return await sql`
+      SELECT * FROM transfers 
+      WHERE claim_id = ${claimId}
+      ORDER BY id
     `;
   },
 };

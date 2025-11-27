@@ -10,7 +10,7 @@ import {
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { log } from "./logger";
-import type { ERC20Config } from './types';
+import type { ERC20Config } from "./types";
 
 // Minimal ERC20 ABI - only what we need
 const ERC20_ABI = [
@@ -30,7 +30,6 @@ const ERC20_ABI = [
     type: "function",
   },
 ] as const;
-
 
 export class ERC20TokenService {
   private readonly walletClient;
@@ -157,5 +156,12 @@ export class ERC20TokenService {
         error: errorMessage,
       };
     }
+  }
+  getTokenAddress(): string {
+    return this.tokenAddress;
+  }
+
+  getAmount(): string {
+    return this.amount;
   }
 }
