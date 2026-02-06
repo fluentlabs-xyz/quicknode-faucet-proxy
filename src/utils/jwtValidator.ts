@@ -2,44 +2,62 @@ import jwt, { type JwtHeader, type SigningKeyCallback } from "jsonwebtoken";
 import jwksClient from "jwks-rsa";
 import { log } from "../logger";
 
+// ========== TYPES ==========
+
+export interface ParaWallet {
+  id: string;
+  type: string;
+  address: string;
+  publicKey: string;
+}
+
+export interface ParaExternalWallet {
+  id: string;
+  address: string;
+  type: string;
+  isVerified: boolean;
+}
+
 export interface ParaJwtPayload {
+  sub: string;
+  aud?: string;
+  iat: number;
+  exp: number;
   data: {
     userId: string;
-    wallets: Array<{
-      id: string;
-      type: string;
-      address: string;
-      publicKey: string;
-    }>;
+    wallets: ParaWallet[];
+    externalWallets?: ParaExternalWallet[];
     email?: string;
     authType: string;
     identifier: string;
     oAuthMethod?: "google" | "x" | "discord" | "facebook" | "apple";
-    // External wallets are optional - only present when user connects external wallet
-    externalWallets?: Array<{
-      id: string;
-      address: string;
-      type: string;
-      isVerified: boolean;
-    }>;
-    externalWalletAddress?: string;
   };
-  iat: number;
-  exp: number;
-  sub: string;
-  aud?: string;
 }
 
-// Cache JWKS clients by URL to avoid redundant connections
+export interface PrivyJwtPayload {
+  sub: string;
+  aud: string;
+  iss: string;
+  iat: number;
+  exp: number;
+  sid?: string;
+  linked_accounts:
+    | string
+    | Array<{
+        type: string;
+        address?: string;
+        wallet_client_type?: string;
+      }>;
+}
+
+export type JwtValidationResult<T> =
+  | { valid: true; payload: T }
+  | { valid: false; error: string };
+
+// ========== JWKS CLIENT CACHE ==========
+
 const jwksClientCache = new Map<string, jwksClient.JwksClient>();
 
-/**
- * Get or create a JWKS client for the specified URL
- * Each unique JWKS URL gets its own client instance to ensure proper key resolution
- *
- * @param jwksUrl - The JWKS endpoint URL
- * @returns JWKS client instance
- */
 function getJwksClient(jwksUrl: string): jwksClient.JwksClient {
   let client = jwksClientCache.get(jwksUrl);
 
@@ -48,10 +66,10 @@ function getJwksClient(jwksUrl: string): jwksClient.JwksClient {
       jwksUri: jwksUrl,
       cache: true,
       cacheMaxEntries: 5,
-      cacheMaxAge: 600000, // 10 minutes
+      cacheMaxAge: 600_000,
       rateLimit: true,
       jwksRequestsPerMinute: 10,
-      timeout: 5000, // 5 second timeout for JWKS requests
+      timeout: 5000,
     });
     jwksClientCache.set(jwksUrl, client);
 
@@ -64,19 +82,13 @@ function getJwksClient(jwksUrl: string): jwksClient.JwksClient {
   return client;
 }
 
-/**
- * Validate Para JWT token against the specified JWKS endpoint
- *
- * @param token - JWT token to validate
- * @param jwksUrl - JWKS endpoint URL for key verification
- * @returns Validation result with decoded payload or error message
- */
-export async function validateParaJwt(
+// ========== JWT VALIDATOR ==========
+
+export async function validateJwt<T>(
   token: string,
-  jwksUrl: string
-): Promise<
-  { valid: true; payload: ParaJwtPayload } | { valid: false; error: string }
-> {
+  jwksUrl: string,
+  options?: { audience?: string; issuer?: string },
+): Promise<JwtValidationResult<T>> {
   return new Promise((resolve) => {
     const client = getJwksClient(jwksUrl);
 
@@ -87,20 +99,19 @@ export async function validateParaJwt(
 
       client.getSigningKey(header.kid, (err, key) => {
         if (err || !key) {
-          const errorMessage =
-            err?.message || `No signing key found for kid: ${header.kid}`;
           log.error(
-            "Failed to retrieve signing key from JWKS",
+            "Failed to retrieve signing key",
             "jwt-validator",
+            err,
             undefined,
-            errorMessage,
             {
               kid: header.kid,
               jwksUrl,
-              stack: err?.stack,
-            }
+            },
           );
-          return callback(err || new Error(errorMessage));
+          return callback(
+            err || new Error(`No signing key for kid: ${header.kid}`),
+          );
         }
         callback(null, key.getPublicKey());
       });
@@ -110,60 +121,84 @@ export async function validateParaJwt(
       token,
       getKey,
       {
-        algorithms: ["RS256"],
-        clockTolerance: 5, // Allow 5 seconds clock skew
+        algorithms: ["RS256", "ES256"],
+        clockTolerance: 5,
+        audience: options?.audience,
+        issuer: options?.issuer,
       },
       (err, decoded) => {
         if (err) {
-          const errorMessage = err.message || "JWT verification failed";
           log.error(
             "JWT verification failed",
             "jwt-validator",
+            err,
             undefined,
-            errorMessage,
             {
               jwksUrl,
               errorCode: err.name,
-              stack: err.stack,
-            }
+            },
           );
-          resolve({ valid: false, error: errorMessage });
-        } else {
-          const payload = decoded as ParaJwtPayload;
-          log.debug("JWT verification successful", "jwt-validator", undefined, {
-            jwksUrl,
-            userId: payload.data?.userId,
-            aud: payload.aud,
-          });
-          resolve({ valid: true, payload });
+          return resolve({ valid: false, error: err.message });
         }
-      }
+
+        log.debug("JWT verified", "jwt-validator", undefined, { jwksUrl });
+        resolve({ valid: true, payload: decoded as T });
+      },
     );
   });
 }
 
+// ========== WALLET EXTRACTION ==========
+
 /**
- * Clear all cached JWKS clients
- * Use this when you need to force refresh all JWKS keys
+ * Get embedded wallet from Privy token
+ * Equivalent to frontend: wallets.find(w => w.connectorType === "embedded")
  */
-export function clearJwksCache(): void {
-  const previousSize = jwksClientCache.size;
-  jwksClientCache.clear();
-  log.info("JWKS cache cleared", "jwt-validator", undefined, {
-    clientsRemoved: previousSize,
-  });
+export function getPrivyEmbeddedWallet(payload: PrivyJwtPayload): string {
+  const accounts =
+    typeof payload.linked_accounts === "string"
+      ? JSON.parse(payload.linked_accounts)
+      : payload.linked_accounts || [];
+
+  const embedded = accounts.find(
+    (a: { type: string; wallet_client_type?: string }) =>
+      a.type === "wallet" && a.wallet_client_type === "privy",
+  );
+
+  if (!embedded?.address) {
+    throw new Error("No embedded wallet in Privy token");
+  }
+
+  return embedded.address;
 }
 
 /**
- * Get current cache statistics for monitoring
- *
- * @returns Object containing cache size and cached URLs
+ * Get wallets from Para token
  */
-export function getJwksCacheStats(): {
-  size: number;
-  urls: string[];
-  timestamp: string;
+export function getParaWallets(payload: ParaJwtPayload): {
+  embeddedWallet: string;
+  externalWallet: string;
 } {
+  const embeddedWallet = payload.data?.wallets?.[0]?.address;
+  const externalWallet = payload.data?.externalWallets?.[0]?.address;
+
+  if (!embeddedWallet) throw new Error("No embedded wallet in Para token");
+  if (!externalWallet) throw new Error("No external wallet in Para token");
+
+  return { embeddedWallet, externalWallet };
+}
+
+// ========== CACHE UTILITIES ==========
+
+export function clearJwksCache(): void {
+  const size = jwksClientCache.size;
+  jwksClientCache.clear();
+  log.info("JWKS cache cleared", "jwt-validator", undefined, {
+    clientsRemoved: size,
+  });
+}
+
+export function getJwksCacheStats() {
   return {
     size: jwksClientCache.size,
     urls: Array.from(jwksClientCache.keys()),

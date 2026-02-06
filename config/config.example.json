@@ -1,0 +1,55 @@
+{
+  "quicknode_api_url": "https://api.faucet.quicknode.com",
+  "distributors": {
+    "/example/para": {
+      "distributorId": "dist-uuid",
+      "distributorApiKey": "${QUICKNODE_API_KEY}",
+      "name": "Para Example",
+      "dripAmount": 0.1,
+      "validators": {
+        "para-account": {
+          "jwksUrl": "https://app.getpara.com/.well-known/jwks.json",
+          "verifyUrl": "https://api.getpara.com/v1/wallets/verify",
+          "secretKey": "${PARA_SECRET_KEY}"
+        },
+        "once-only": {}
+      }
+    },
+    "/example/privy": {
+      "distributorId": "dist-uuid",
+      "distributorApiKey": "${QUICKNODE_API_KEY}",
+      "name": "Privy Example",
+      "dripAmount": 0.1,
+      "validators": {
+        "privy-account": {
+          "jwksUrl": "https://auth.privy.io/api/v1/apps/${PRIVY_APP_ID}/jwks.json",
+          "appId": "${PRIVY_APP_ID}"
+        },
+        "time-limit": {
+          "period": "week",
+          "maxClaims": 3,
+          "cooldownHours": 24
+        }
+      }
+    },
+    "/example/direct": {
+      "distributorId": "dist-uuid",
+      "distributorApiKey": "${QUICKNODE_API_KEY}",
+      "name": "Direct Example",
+      "dripAmount": 0.05,
+      "erc20Configs": [
+        {
+          "tokenAddress": "0x...",
+          "amount": "100",
+          "privateKey": "${ERC20_PRIVATE_KEY}",
+          "rpcUrl": "https://rpc.example.com",
+          "chainId": 1
+        }
+      ],
+      "validators": {
+        "direct": true,
+        "once-only": {}
+      }
+    }
+  }
+}

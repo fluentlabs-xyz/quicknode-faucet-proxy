@@ -13,7 +13,7 @@ try {
   if (!Bun.env.CONFIG_PATH) {
     throw new Error("CONFIG_PATH is required");
   }
-  const distributors = await createDistributors(Bun.env.CONFIG_PATH!);
+  const distributors = await createDistributors(Bun.env.CONFIG_PATH);
   const server = createServer(distributors);
 
   log.info(`Server running on port ${server.port}`, "startup");

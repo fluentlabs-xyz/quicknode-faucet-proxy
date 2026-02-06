@@ -9,18 +9,26 @@ import type {
   DistributorConfig,
   GlobalConfig,
 } from "./types";
-import { validateParaJwt } from "./utils/jwtValidator";
+import {
+  validateJwt,
+  getPrivyEmbeddedWallet,
+  getParaWallets,
+  type ParaJwtPayload,
+  type PrivyJwtPayload,
+} from "./utils/jwtValidator";
 import { NFTOwnershipValidator } from "./validators/nft";
 import { OnceOnlyValidator, TimeLimitValidator } from "./validators/time";
 
+// ========== FACTORY ==========
+
 export async function createDistributors(
-  configPath: string
+  configPath: string,
 ): Promise<Map<string, Distributor>> {
   const distributors = new Map<string, Distributor>();
 
   const configFile = await Bun.file(configPath).text();
   const config: GlobalConfig = JSON.parse(
-    configFile.replace(/\$\{([^}]+)\}/g, (_, key) => Bun.env[key] || "")
+    configFile.replace(/\$\{([^}]+)\}/g, (_, key) => Bun.env[key] || ""),
   );
 
   for (const [path, distConfig] of Object.entries(config.distributors)) {
@@ -32,7 +40,7 @@ export async function createDistributors(
       validators: distConfig.validators,
       erc20Configs: distConfig.erc20Configs,
     });
-    
+
     distributors.set(path, distributor);
   }
 
@@ -44,45 +52,55 @@ export async function createDistributors(
   return distributors;
 }
 
+// ========== CONFIG SCHEMAS ==========
+
 const ParaConfigSchema = z.object({
-  paraJwksUrl: z.url("Para JWKS URL must be a valid URL"),
-  paraVerifyUrl: z.url("Para Verify URL must be a valid URL"),
-  paraSecretKey: z.string().min(1, "Para Secret Key is required"),
+  jwksUrl: z.url(),
+  verifyUrl: z.url().optional(),
+  secretKey: z.string().optional(),
 });
 
-export class Distributor {
-  private paraConfig?: {
-    paraJwksUrl: string;
-    paraVerifyUrl: string;
-    paraSecretKey: string;
-  };
-  private isDirect = false;
+const PrivyConfigSchema = z.object({
+  jwksUrl: z.url(),
+  appId: z.string().min(1),
+});
 
-  // Validators
+type ParaConfig = z.infer<typeof ParaConfigSchema>;
+type PrivyConfig = z.infer<typeof PrivyConfigSchema>;
+
+type IdentityConfig =
+  | { mode: "para"; para: ParaConfig }
+  | { mode: "privy"; privy: PrivyConfig }
+  | { mode: "direct" };
+
+// ========== DISTRIBUTOR ==========
+
+export class Distributor {
+  private identity: IdentityConfig;
+
   private timeLimitValidator?: TimeLimitValidator;
   private onceOnlyValidator?: OnceOnlyValidator;
   private nftValidator?: NFTOwnershipValidator;
 
-  // ERC20 services (multiple tokens)
   private erc20Services: ERC20TokenService[] = [];
 
   constructor(private readonly cfg: DistributorConfig) {
+    this.identity = this.parseIdentityConfig();
     this.parseValidatorConfigs();
 
-    // Initialize ERC20 services if configured
     if (cfg.erc20Configs) {
       this.erc20Services = cfg.erc20Configs.map(
-        (c) => new ERC20TokenService(c)
+        (c) => new ERC20TokenService(c),
       );
     }
 
     log.info("Distributor initialized", "distributor", undefined, {
       path: cfg.path,
-      mode: this.isDirect ? "direct" : "para",
-      onceOnlyEnabled: !!this.onceOnlyValidator,
-      timeLimitEnabled: !!this.timeLimitValidator,
-      nftEnabled: !!this.nftValidator,
-      erc20TokensCount: this.erc20Services.length,
+      mode: this.identity.mode,
+      onceOnly: !!this.onceOnlyValidator,
+      timeLimit: !!this.timeLimitValidator,
+      nft: !!this.nftValidator,
+      erc20Tokens: this.erc20Services.length,
     });
   }
 
@@ -94,44 +112,60 @@ export class Distributor {
     return this.cfg.distributorId;
   }
 
-  private parseValidatorConfigs(): void {
-    if (!this.cfg.validators) {
+  // ========== CONFIG PARSING ==========
+
+  private parseIdentityConfig(): IdentityConfig {
+    const configs = this.cfg.validators;
+    if (!configs) {
       throw new Error(`No validator configs for ${this.cfg.path}`);
     }
 
-    const configs = this.cfg.validators;
+    const hasPara = !!configs["para-account"];
+    const hasPrivy = !!configs["privy-account"];
+    const hasDirect = !!configs["direct"];
 
-    // Exactly one wallet source must be configured
-    if (configs["para-account"] && configs["direct"]) {
+    const count = [hasPara, hasPrivy, hasDirect].filter(Boolean).length;
+
+    if (count !== 1) {
       throw new Error(
-        `Conflicting configs: "para-account" and "direct" cannot both be enabled`
+        `Exactly one of "para-account", "privy-account", or "direct" must be configured for ${this.cfg.path}`,
       );
     }
-    if (!configs["para-account"] && !configs["direct"]) {
-      throw new Error(`One of "para-account" or "direct" must be configured`);
+
+    if (hasPara) {
+      return {
+        mode: "para",
+        para: ParaConfigSchema.parse(configs["para-account"]),
+      };
     }
 
-    // Parse wallet source
-    if (configs["para-account"]) {
-      this.paraConfig = ParaConfigSchema.parse(configs["para-account"]);
+    if (hasPrivy) {
+      return {
+        mode: "privy",
+        privy: PrivyConfigSchema.parse(configs["privy-account"]),
+      };
     }
 
-    if (configs["direct"]) {
-      this.isDirect = true;
-    }
+    return { mode: "direct" };
+  }
 
-    // Create validators
+  private parseValidatorConfigs(): void {
+    const configs = this.cfg.validators;
+    if (!configs) return;
+
     if (configs["once-only"]) {
       this.onceOnlyValidator = new OnceOnlyValidator();
     }
 
-    // Support both old "weekly-limit" and new "time-limit" configs
     if (configs["weekly-limit"]) {
-      const oldConfig = configs["weekly-limit"] as any;
+      const old = configs["weekly-limit"] as {
+        maxClaimsPerWeek?: number;
+        cooldownHours?: number;
+      };
       this.timeLimitValidator = new TimeLimitValidator({
         period: "week",
-        maxClaims: oldConfig.maxClaimsPerWeek || 3,
-        cooldownHours: oldConfig.cooldownHours || 24,
+        maxClaims: old.maxClaimsPerWeek || 3,
+        cooldownHours: old.cooldownHours || 24,
       });
     } else if (configs["time-limit"]) {
       this.timeLimitValidator = new TimeLimitValidator(configs["time-limit"]);
@@ -142,24 +176,32 @@ export class Distributor {
     }
   }
 
+  // ========== REQUEST PARSING ==========
+
   async parseRequestFromBody(
     body: unknown,
-    headers: Headers
-  ): Promise<ClaimRequest> {
-    if (this.isDirect) {
-      return this.parseDirectRequestFromBody(body, headers);
-    }
-    return this.parseParaRequestFromBody(body, headers);
-  }
-
-  private parseParaRequestFromBody(
-    body: unknown,
-    headers: Headers
+    headers: Headers,
   ): Promise<ClaimRequest> {
     const rawBody = body as Record<string, unknown>;
 
     if (!rawBody?.visitorId) {
       throw new Error("Missing visitorId");
+    }
+
+    const clientIp = this.extractClientIP(headers);
+
+    if (this.identity.mode === "direct") {
+      const walletAddress = rawBody.walletAddress as string;
+      if (!walletAddress || !/^0x[a-fA-F0-9]{40}$/i.test(walletAddress)) {
+        throw new Error("Invalid or missing wallet address");
+      }
+
+      return {
+        visitorId: rawBody.visitorId as string,
+        clientIp,
+        walletAddress: walletAddress as `0x${string}`,
+        ...rawBody,
+      };
     }
 
     const authHeader = headers.get("authorization");
@@ -171,35 +213,12 @@ export class Distributor {
       throw new Error("Authorization token is required");
     }
 
-    return Promise.resolve({
+    return {
       visitorId: rawBody.visitorId as string,
-      clientIp: this.extractClientIP(headers),
+      clientIp,
       token,
       ...rawBody,
-    });
-  }
-
-  private parseDirectRequestFromBody(
-    body: unknown,
-    headers: Headers
-  ): Promise<ClaimRequest> {
-    const rawBody = body as Record<string, unknown>;
-
-    if (!rawBody?.visitorId) {
-      throw new Error("Missing visitorId");
-    }
-
-    const walletAddress = rawBody.walletAddress as string;
-    if (!walletAddress || !/^0x[a-fA-F0-9]{40}$/i.test(walletAddress)) {
-      throw new Error("Invalid or missing wallet address");
-    }
-
-    return Promise.resolve({
-      visitorId: rawBody.visitorId as string,
-      clientIp: this.extractClientIP(headers),
-      walletAddress: walletAddress as `0x${string}`,
-      ...rawBody,
-    });
+    };
   }
 
   private extractClientIP(headers: Headers): string {
@@ -211,319 +230,251 @@ export class Distributor {
     );
   }
 
+  // ========== CLAIM PROCESSING ==========
+
   async processClaim(
     request: ClaimRequest,
-    requestId?: string
-  ): Promise<ClaimResult> {
-    if (this.isDirect) {
-      return this.processDirectClaim(request, requestId);
-    }
-    return this.processParaClaim(request, requestId);
-  }
-
-  private async processParaClaim(
-    request: ClaimRequest,
-    requestId?: string
+    requestId?: string,
   ): Promise<ClaimResult> {
     try {
-      // Extract wallet addresses from JWT
-      const { embeddedWallet, externalWallet } = await this.validateParaAccount(
-        request.token as string,
-        requestId
-      );
+      const wallet = await this.resolveWallet(request, requestId);
 
-      // Run validators
-      if (this.onceOnlyValidator) {
-        await this.onceOnlyValidator.validate(
-          externalWallet,
-          this.cfg.distributorId,
-          requestId
-        );
-      }
+      await this.runValidators(wallet, requestId);
 
-      if (this.timeLimitValidator) {
-        await this.timeLimitValidator.validate(
-          externalWallet,
-          this.cfg.distributorId,
-          requestId
-        );
-      }
-
-      if (this.nftValidator) {
-        await this.nftValidator.validate(externalWallet, requestId);
-      }
-
-      // Submit claim to QuickNode
-      const response = await quickNodeService.submitClaim(
-        this.cfg.distributorApiKey,
-        {
-          address: embeddedWallet,
-          ip: request.clientIp,
-          visitorId: request.visitorId,
-        },
-        requestId
-      );
-
-      if (!response.success) {
-        throw new Error(response.message || "Claim rejected by QuickNode");
-      }
-
-      // Collect all transfers
-      const transfers: TransferRecord[] = [];
-
-      // Native token transfer
-      transfers.push({
-        tokenType: "native",
-        txHash: response.transactionId || null,
-        amount: this.cfg.dripAmount,
-        success: true,
-      });
-
-      // ERC20 token transfers
-      for (const service of this.erc20Services) {
-        const result = await service.transferTokens(embeddedWallet, requestId);
-        transfers.push({
-          tokenType: "erc20",
-          tokenAddress: service.getTokenAddress(),
-          txHash: result.txHash || null,
-          amount: service.getAmount(),
-          success: result.success,
-          error: result.error,
-        });
-
-        if (!result.success) {
-          log.error(
-            "ERC20 transfer failed after successful QuickNode claim",
-            "distributor",
-            requestId,
-            result.error,
-            {
-              wallet: embeddedWallet,
-              token: service.getTokenAddress(),
-            }
-          );
-        }
-      }
-
-      // Record claim in database
-      const claimId = await queries.insertClaim({
-        distributorId: this.cfg.distributorId,
-        embeddedWallet,
-        externalWallet,
-        visitorId: request.visitorId,
-        ip: request.clientIp,
-        txId: response.transactionId || null,
-        amount: this.cfg.dripAmount,
-      });
-
-      // Record all transfers
-      await queries.insertTransfers(claimId, transfers);
-
-      return {
-        success: true,
-        transactionId: response.transactionId || "",
-        amount: this.cfg.dripAmount,
-        message: "Claim processed successfully",
-        transfers,
-      };
+      return await this.executePayout(wallet, request, requestId);
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Claim processing failed";
-
       if (requestId) {
         log.info("Claim failed", "distributor", requestId, { error: message });
       }
-
       return { success: false, error: message };
     }
   }
 
-  private async processDirectClaim(
+  // ========== WALLET RESOLUTION ==========
+
+  private async resolveWallet(
     request: ClaimRequest,
-    requestId?: string
-  ): Promise<ClaimResult> {
-    try {
-      // Extract wallet address from request
-      const walletAddress = request.walletAddress;
-      if (!walletAddress) {
-        throw new Error("Wallet address is required in direct mode");
-      }
-
-      // Run validators
-      if (this.onceOnlyValidator) {
-        await this.onceOnlyValidator.validate(
-          walletAddress,
-          this.cfg.distributorId,
-          requestId
-        );
-      }
-
-      if (this.timeLimitValidator) {
-        await this.timeLimitValidator.validate(
-          walletAddress,
-          this.cfg.distributorId,
-          requestId
-        );
-      }
-
-      if (this.nftValidator) {
-        await this.nftValidator.validate(walletAddress, requestId);
-      }
-
-      // Submit claim to QuickNode
-      const response = await quickNodeService.submitClaim(
-        this.cfg.distributorApiKey,
-        {
-          address: walletAddress,
-          ip: request.clientIp,
-          visitorId: request.visitorId,
-        },
-        requestId
-      );
-
-      if (!response.success) {
-        throw new Error(response.message || "Claim rejected by QuickNode");
-      }
-
-      // Collect all transfers
-      const transfers: TransferRecord[] = [];
-
-      // Native token transfer
-      transfers.push({
-        tokenType: "native",
-        txHash: response.transactionId || null,
-        amount: this.cfg.dripAmount,
-        success: true,
-      });
-
-      // ERC20 token transfers
-      for (const service of this.erc20Services) {
-        const result = await service.transferTokens(walletAddress, requestId);
-        transfers.push({
-          tokenType: "erc20",
-          tokenAddress: service.getTokenAddress(),
-          txHash: result.txHash || null,
-          amount: service.getAmount(),
-          success: result.success,
-          error: result.error,
-        });
-
-        if (!result.success) {
-          log.error(
-            "ERC20 transfer failed after successful QuickNode claim",
-            "distributor",
-            requestId,
-            result.error,
-            {
-              wallet: walletAddress,
-              token: service.getTokenAddress(),
-            }
-          );
+    requestId?: string,
+  ): Promise<string> {
+    switch (this.identity.mode) {
+      case "direct": {
+        if (!request.walletAddress) {
+          throw new Error("Wallet address required in direct mode");
         }
+        return request.walletAddress;
       }
 
-      // Record claim in database
-      const claimId = await queries.insertClaim({
-        distributorId: this.cfg.distributorId,
-        embeddedWallet: walletAddress,
-        externalWallet: walletAddress,
-        visitorId: request.visitorId,
-        ip: request.clientIp,
-        txId: response.transactionId || null,
-        amount: this.cfg.dripAmount,
-      });
-
-      // Record all transfers
-      await queries.insertTransfers(claimId, transfers);
-
-      return {
-        success: true,
-        transactionId: response.transactionId || "",
-        amount: this.cfg.dripAmount,
-        message: "Claim processed successfully",
-        transfers,
-      };
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Claim processing failed";
-
-      if (requestId) {
-        log.info("Claim failed", "distributor", requestId, { error: message });
+      case "para": {
+        if (!request.token) {
+          throw new Error("Authorization token required");
+        }
+        return this.resolveParaWallet(
+          request.token,
+          this.identity.para,
+          requestId,
+        );
       }
 
-      return { success: false, error: message };
+      case "privy": {
+        if (!request.token) {
+          throw new Error("Authorization token required");
+        }
+        return this.resolvePrivyWallet(
+          request.token,
+          this.identity.privy,
+          requestId,
+        );
+      }
     }
   }
 
-  /**
-   * Validate Para JWT and extract wallet addresses
-   */
-  private async validateParaAccount(
-    token: string | undefined,
-    requestId?: string
-  ): Promise<{ embeddedWallet: string; externalWallet: string }> {
-    if (!token) {
-      throw new Error("Authorization token is required");
+  private async resolveParaWallet(
+    token: string,
+    config: ParaConfig,
+    requestId?: string,
+  ): Promise<string> {
+    const result = await validateJwt<ParaJwtPayload>(token, config.jwksUrl);
+
+    if (!result.valid) {
+      throw new Error(`Invalid Para token: ${result.error}`);
     }
 
-    if (!this.paraConfig) {
-      throw new Error("Para validation not configured");
+    const { embeddedWallet, externalWallet } = getParaWallets(result.payload);
+
+    if (config.verifyUrl) {
+      await this.verifyParaProject(embeddedWallet, config);
     }
-
-    const jwtResult = await validateParaJwt(token, this.paraConfig.paraJwksUrl);
-
-    if (!jwtResult.valid) {
-      throw new Error(`Invalid token: ${jwtResult.error}`);
-    }
-
-    const payload = jwtResult.payload;
-    const data = payload.data;
-
-    const embeddedWallet = data.wallets?.[0]?.address;
-    const externalWallet = data.externalWallets?.[0]?.address;
-
-    if (!embeddedWallet) {
-      throw new Error("No embedded wallet addresses found in Para token");
-    }
-
-    if (!externalWallet) {
-      throw new Error("No external wallet addresses found in Para token");
-    }
-
-    await this.verifyParaProject(embeddedWallet);
 
     if (requestId) {
-      log.debug("Para validation successful", "distributor", requestId, {
+      log.debug("Para wallet resolved", "distributor", requestId, {
         embeddedWallet,
         externalWallet,
-        userId: data.userId,
+        userId: result.payload.data.userId,
       });
     }
 
-    return { embeddedWallet, externalWallet };
+    // Para uses externalWallet for rate limiting, embeddedWallet for payout
+    // Store both but return embeddedWallet as the main wallet
+    return embeddedWallet;
   }
 
-  private async verifyParaProject(address: string): Promise<void> {
-    if (!this.paraConfig) return;
+  private async resolvePrivyWallet(
+    token: string,
+    config: PrivyConfig,
+    requestId?: string,
+  ): Promise<string> {
+    const result = await validateJwt<PrivyJwtPayload>(token, config.jwksUrl, {
+      audience: config.appId,
+      issuer: "privy.io",
+    });
 
-    const resp = await fetch(this.paraConfig.paraVerifyUrl, {
+    if (!result.valid) {
+      throw new Error(`Invalid Privy token: ${result.error}`);
+    }
+
+    const wallet = getPrivyEmbeddedWallet(result.payload);
+
+    if (requestId) {
+      log.debug("Privy wallet resolved", "distributor", requestId, {
+        wallet,
+        userId: result.payload.sub,
+      });
+    }
+
+    return wallet;
+  }
+
+  private async verifyParaProject(
+    address: string,
+    config: ParaConfig,
+  ): Promise<void> {
+    if (!config.verifyUrl) return;
+
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+    };
+    if (config.secretKey) {
+      headers["x-external-api-key"] = config.secretKey;
+    }
+
+    const resp = await fetch(config.verifyUrl, {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-external-api-key": this.paraConfig.paraSecretKey,
-      },
+      headers,
       body: JSON.stringify({ address }),
     });
 
-    if (resp.status === 404) {
-      // Wallet doesn't exist yet - that's ok
-      return;
-    }
+    if (resp.status === 404) return;
 
     if (!resp.ok) {
       throw new Error(
-        `Para wallet verification failed: ${resp.status} ${resp.statusText}`
+        `Para wallet verification failed: ${resp.status} ${resp.statusText}`,
       );
     }
+  }
+
+  // ========== VALIDATORS ==========
+
+  private async runValidators(
+    wallet: string,
+    requestId?: string,
+  ): Promise<void> {
+    if (this.onceOnlyValidator) {
+      await this.onceOnlyValidator.validate(
+        wallet,
+        this.cfg.distributorId,
+        requestId,
+      );
+    }
+
+    if (this.timeLimitValidator) {
+      await this.timeLimitValidator.validate(
+        wallet,
+        this.cfg.distributorId,
+        requestId,
+      );
+    }
+
+    if (this.nftValidator) {
+      await this.nftValidator.validate(wallet, requestId);
+    }
+  }
+
+  // ========== PAYOUT EXECUTION ==========
+
+  private async executePayout(
+    wallet: string,
+    request: ClaimRequest,
+    requestId?: string,
+  ): Promise<ClaimResult> {
+    const response = await quickNodeService.submitClaim(
+      this.cfg.distributorApiKey,
+      {
+        address: wallet,
+        ip: request.clientIp,
+        visitorId: request.visitorId,
+      },
+      requestId,
+    );
+
+    if (!response.success) {
+      throw new Error(response.message || "Claim rejected by QuickNode");
+    }
+
+    const transfers: TransferRecord[] = [
+      {
+        tokenType: "native",
+        txHash: response.transactionId || null,
+        amount: this.cfg.dripAmount,
+        success: true,
+      },
+    ];
+
+    for (const service of this.erc20Services) {
+      const result = await service.transferTokens(wallet, requestId);
+
+      transfers.push({
+        tokenType: "erc20",
+        tokenAddress: service.getTokenAddress(),
+        txHash: result.txHash || null,
+        amount: service.getAmount(),
+        success: result.success,
+        error: result.error,
+      });
+
+      if (!result.success) {
+        log.error(
+          "ERC20 transfer failed",
+          "distributor",
+          result.error,
+          requestId,
+          {
+            wallet,
+            token: service.getTokenAddress(),
+          },
+        );
+      }
+    }
+
+    const claimId = await queries.insertClaim({
+      distributorId: this.cfg.distributorId,
+      embeddedWallet: wallet,
+      externalWallet: wallet, // Same as embedded for Privy
+      visitorId: request.visitorId,
+      ip: request.clientIp,
+      txId: response.transactionId || null,
+      amount: this.cfg.dripAmount,
+    });
+
+    await queries.insertTransfers(claimId, transfers);
+
+    return {
+      success: true,
+      transactionId: response.transactionId || "",
+      amount: this.cfg.dripAmount,
+      message: "Claim processed successfully",
+      transfers,
+    };
   }
 }
