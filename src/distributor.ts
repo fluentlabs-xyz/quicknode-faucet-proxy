@@ -430,6 +430,7 @@ export class Distributor {
         success: true,
       },
     ];
+    let hasFailedErc20Transfer = false;
 
     for (const service of this.erc20Services) {
       const result = await service.transferTokens(wallet, requestId);
@@ -444,6 +445,7 @@ export class Distributor {
       });
 
       if (!result.success) {
+        hasFailedErc20Transfer = true;
         log.error(
           "ERC20 transfer failed",
           "distributor",
@@ -473,7 +475,9 @@ export class Distributor {
       success: true,
       transactionId: response.transactionId || "",
       amount: this.cfg.dripAmount,
-      message: "Claim processed successfully",
+      message: hasFailedErc20Transfer
+        ? "Claim processed, but one or more ERC20 transfers failed"
+        : "Claim processed successfully",
       transfers,
     };
   }

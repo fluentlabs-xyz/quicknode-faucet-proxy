@@ -11,6 +11,7 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 import { log } from "./logger";
 import type { ERC20Config } from "./types";
+import { KeyedMutex } from "./utils/keyedMutex";
 
 // Minimal ERC20 ABI - only what we need
 const ERC20_ABI = [
@@ -37,6 +38,9 @@ export class ERC20TokenService {
   private readonly tokenAddress: Address;
   private readonly amount: string;
   private readonly chain: Chain;
+  private readonly senderAddress: Address;
+
+  private static readonly signerMutex = new KeyedMutex();
 
   constructor(config: ERC20Config) {
     // Validate token address
@@ -53,6 +57,7 @@ export class ERC20TokenService {
 
     // Create account from private key
     const account = privateKeyToAccount(privateKey);
+    this.senderAddress = account.address;
 
     // Setup chain (minimal chain object)
     this.chain = {
@@ -87,15 +92,51 @@ export class ERC20TokenService {
 
     log.info("ERC20 service initialized", "erc20", undefined, {
       tokenAddress: this.tokenAddress,
-      senderAddress: account.address,
+      senderAddress: this.senderAddress,
       chainId: this.chain.id,
     });
+  }
+
+  private async waitForReceiptWithRetry(
+    txHash: Hex,
+    requestId?: string
+  ): Promise<{ status: string; blockNumber: bigint }> {
+    try {
+      return (await this.publicClient.waitForTransactionReceipt({
+        hash: txHash,
+        confirmations: 1,
+      })) as { status: string; blockNumber: bigint };
+    } catch (initialError) {
+      const delaysMs = [200, 500, 1000];
+
+      log.warn("ERC20 confirmation delayed, retrying receipt check", "erc20", requestId, {
+        txHash,
+        attempts: delaysMs.length,
+      });
+
+      for (const delayMs of delaysMs) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+
+        try {
+          const receipt = await this.publicClient.getTransactionReceipt({
+            hash: txHash,
+          });
+          return receipt as { status: string; blockNumber: bigint };
+        } catch {
+          // Continue retries on receipt-not-found style errors.
+        }
+      }
+
+      throw initialError;
+    }
   }
 
   async transferTokens(
     recipient: string,
     requestId?: string
   ): Promise<{ success: boolean; txHash?: Hex; error?: string }> {
+    let txHash: Hex | undefined;
+
     try {
       // Validate recipient address
       if (!isAddress(recipient)) {
@@ -117,22 +158,28 @@ export class ERC20TokenService {
         amount: this.amount,
         amountWei: amountWei.toString(),
         decimals: Number(decimals),
+        senderAddress: this.senderAddress,
       });
 
-      // Send transaction with explicit chain
-      const txHash = await this.walletClient.writeContract({
-        chain: this.chain,
-        address: this.tokenAddress,
-        abi: ERC20_ABI,
-        functionName: "transfer",
-        args: [recipient as Address, amountWei],
-      });
+      // Serialize sends by signer to avoid nonce races on the same funding wallet.
+      const receipt = await ERC20TokenService.signerMutex.runExclusive(
+        this.senderAddress.toLowerCase(),
+        async () => {
+          txHash = await this.walletClient.writeContract({
+            chain: this.chain,
+            address: this.tokenAddress,
+            abi: ERC20_ABI,
+            functionName: "transfer",
+            args: [recipient as Address, amountWei],
+          });
 
-      // Wait for confirmation (1 block is enough for most cases)
-      const receipt = await this.publicClient.waitForTransactionReceipt({
-        hash: txHash,
-        confirmations: 1,
-      });
+          return await this.waitForReceiptWithRetry(txHash, requestId);
+        }
+      );
+
+      if (!txHash) {
+        throw new Error("Transaction hash missing after writeContract");
+      }
 
       if (receipt.status === "success") {
         log.info("ERC20 transfer completed", "erc20", requestId, {
@@ -147,12 +194,16 @@ export class ERC20TokenService {
       const errorMessage =
         error instanceof Error ? error.message : "Unknown error occurred";
 
-      log.error("ERC20 transfer failed", "erc20", requestId, errorMessage, {
+      log.error("ERC20 transfer failed", "erc20", error, requestId, {
         recipient,
+        tokenAddress: this.tokenAddress,
+        senderAddress: this.senderAddress,
+        txHash,
       });
 
       return {
         success: false,
+        txHash,
         error: errorMessage,
       };
     }
