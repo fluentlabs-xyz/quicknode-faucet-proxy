@@ -12,6 +12,11 @@ export interface QuickNodeClaimResponse {
   message?: string;
 }
 
+export interface QuickNodeLogContext {
+  distributorId?: string;
+  distributorPath?: string;
+}
+
 /**
  * QuickNode API Service
  * KISS: Simple and direct API calls
@@ -29,13 +34,15 @@ class QuickNodeService {
   async submitClaim(
     distributorApiKey: string,
     request: QuickNodeClaimRequest,
-    requestId?: string
+    requestId?: string,
+    logContext?: QuickNodeLogContext,
   ): Promise<QuickNodeClaimResponse> {
     if (requestId) {
       log.info("Submitting claim", "quicknode", requestId, {
         address: request.address,
         visitorId: request.visitorId,
         ip: request.ip,
+        ...logContext,
       });
     }
 
@@ -56,7 +63,12 @@ class QuickNodeService {
 
       // Handle errors with requestId for tracing
       if (!response.ok) {
-        return this.handleClaimError(response.status, responseText, requestId);
+        return this.handleClaimError(
+          response.status,
+          responseText,
+          requestId,
+          logContext,
+        );
       }
 
       const data = JSON.parse(responseText);
@@ -65,6 +77,7 @@ class QuickNodeService {
         log.info("Claim submitted successfully", "quicknode", requestId, {
           txId: data.transactionId,
           address: request.address,
+          ...logContext,
         });
       }
 
@@ -77,6 +90,7 @@ class QuickNodeService {
       log.error("Claim submission failed", "quicknode", error, requestId, {
         address: request.address,
         distributorApiKey: distributorApiKey.substring(0, 8) + "...", // Log partial key for debugging
+        ...logContext,
       });
       throw error;
     }
@@ -88,18 +102,26 @@ class QuickNodeService {
   private handleClaimError(
     status: number,
     responseText: string,
-    requestId?: string
+    requestId?: string,
+    logContext?: QuickNodeLogContext,
   ): QuickNodeClaimResponse {
     try {
       const errorData = JSON.parse(responseText);
 
       // Log the actual error from QuickNode
-      log.error("QuickNode claim rejected", "quicknode", null, requestId, {
+      log.error(
+        "QuickNode claim rejected",
+        "quicknode",
+        errorData.message || `QuickNode API error (${status})`,
+        requestId,
+        {
         status,
         errorData,
         isTapClosed: errorData.data?.isTapClosed,
         message: errorData.message,
-      });
+        ...logContext,
+        },
+      );
 
       // Daily limit reached
       if (errorData.data?.isTapClosed === true) {
@@ -124,6 +146,7 @@ class QuickNodeService {
         {
           status,
           responseText: responseText.substring(0, 500), // Limit log size
+          ...logContext,
         }
       );
 

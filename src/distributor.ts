@@ -101,6 +101,8 @@ export class Distributor {
       timeLimit: !!this.timeLimitValidator,
       nft: !!this.nftValidator,
       erc20Tokens: this.erc20Services.length,
+      distributorId: cfg.distributorId,
+      distributorPath: cfg.path,
     });
   }
 
@@ -110,6 +112,13 @@ export class Distributor {
 
   get id() {
     return this.cfg.distributorId;
+  }
+
+  private getLogContext() {
+    return {
+      distributorId: this.cfg.distributorId,
+      distributorPath: this.cfg.path,
+    };
   }
 
   // ========== CONFIG PARSING ==========
@@ -246,7 +255,10 @@ export class Distributor {
       const message =
         error instanceof Error ? error.message : "Claim processing failed";
       if (requestId) {
-        log.info("Claim failed", "distributor", requestId, { error: message });
+        log.info("Claim failed", "distributor", requestId, {
+          error: message,
+          ...this.getLogContext(),
+        });
       }
       return { success: false, error: message };
     }
@@ -312,6 +324,7 @@ export class Distributor {
         embeddedWallet,
         externalWallet,
         userId: result.payload.data.userId,
+        ...this.getLogContext(),
       });
     }
 
@@ -340,6 +353,7 @@ export class Distributor {
       log.debug("Privy wallet resolved", "distributor", requestId, {
         wallet,
         userId: result.payload.sub,
+        ...this.getLogContext(),
       });
     }
 
@@ -408,6 +422,8 @@ export class Distributor {
     request: ClaimRequest,
     requestId?: string,
   ): Promise<ClaimResult> {
+    const logContext = this.getLogContext();
+
     const response = await quickNodeService.submitClaim(
       this.cfg.distributorApiKey,
       {
@@ -416,6 +432,7 @@ export class Distributor {
         visitorId: request.visitorId,
       },
       requestId,
+      logContext,
     );
 
     if (!response.success) {
@@ -433,7 +450,7 @@ export class Distributor {
     let hasFailedErc20Transfer = false;
 
     for (const service of this.erc20Services) {
-      const result = await service.transferTokens(wallet, requestId);
+      const result = await service.transferTokens(wallet, requestId, logContext);
 
       transfers.push({
         tokenType: "erc20",
@@ -454,6 +471,7 @@ export class Distributor {
           {
             wallet,
             token: service.getTokenAddress(),
+            ...logContext,
           },
         );
       }

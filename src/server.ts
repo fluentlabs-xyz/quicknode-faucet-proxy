@@ -62,7 +62,11 @@ export function createServer(distributors: Map<string, Distributor>) {
         const distributor = distributors.get(pathname);
 
         if (!distributor) {
-          log.warn(`Unknown endpoint: ${pathname}`, "server", requestId);
+          log.warn(`Unknown endpoint: ${pathname}`, "server", requestId, {
+            method: req.method,
+            path: pathname,
+            ip,
+          });
           return Response.json(
             {
               error: "Endpoint not found",
@@ -105,6 +109,7 @@ export function createServer(distributors: Map<string, Distributor>) {
           ip,
           claimRequest.walletAddress as string,
           claimRequest.visitorId,
+          distributor.id,
           distributor.path,
           claimRequest.token
         );

@@ -13,6 +13,11 @@ import { log } from "./logger";
 import type { ERC20Config } from "./types";
 import { KeyedMutex } from "./utils/keyedMutex";
 
+type TransferLogContext = {
+  distributorId?: string;
+  distributorPath?: string;
+};
+
 // Minimal ERC20 ABI - only what we need
 const ERC20_ABI = [
   {
@@ -99,7 +104,8 @@ export class ERC20TokenService {
 
   private async waitForReceiptWithRetry(
     txHash: Hex,
-    requestId?: string
+    requestId?: string,
+    logContext?: TransferLogContext,
   ): Promise<{ status: string; blockNumber: bigint }> {
     try {
       return (await this.publicClient.waitForTransactionReceipt({
@@ -112,6 +118,7 @@ export class ERC20TokenService {
       log.warn("ERC20 confirmation delayed, retrying receipt check", "erc20", requestId, {
         txHash,
         attempts: delaysMs.length,
+        ...logContext,
       });
 
       for (const delayMs of delaysMs) {
@@ -133,7 +140,8 @@ export class ERC20TokenService {
 
   async transferTokens(
     recipient: string,
-    requestId?: string
+    requestId?: string,
+    logContext?: TransferLogContext,
   ): Promise<{ success: boolean; txHash?: Hex; error?: string }> {
     let txHash: Hex | undefined;
 
@@ -159,6 +167,8 @@ export class ERC20TokenService {
         amountWei: amountWei.toString(),
         decimals: Number(decimals),
         senderAddress: this.senderAddress,
+        tokenAddress: this.tokenAddress,
+        ...logContext,
       });
 
       // Serialize sends by signer to avoid nonce races on the same funding wallet.
@@ -173,7 +183,7 @@ export class ERC20TokenService {
             args: [recipient as Address, amountWei],
           });
 
-          return await this.waitForReceiptWithRetry(txHash, requestId);
+          return await this.waitForReceiptWithRetry(txHash, requestId, logContext);
         }
       );
 
@@ -185,6 +195,9 @@ export class ERC20TokenService {
         log.info("ERC20 transfer completed", "erc20", requestId, {
           txHash,
           blockNumber: receipt.blockNumber.toString(),
+          tokenAddress: this.tokenAddress,
+          senderAddress: this.senderAddress,
+          ...logContext,
         });
         return { success: true, txHash };
       }
@@ -199,6 +212,7 @@ export class ERC20TokenService {
         tokenAddress: this.tokenAddress,
         senderAddress: this.senderAddress,
         txHash,
+        ...logContext,
       });
 
       return {

@@ -4,6 +4,90 @@ import jwt from "jsonwebtoken";
 // Generate short request ID
 export const generateRequestId = (): string => crypto.randomUUID().slice(0, 8);
 
+type LinkedAccountSummary = {
+  type?: string;
+  wallet_client_type?: string;
+};
+
+const parseLinkedAccounts = (
+  value: unknown,
+): LinkedAccountSummary[] | undefined => {
+  if (Array.isArray(value)) {
+    return value as LinkedAccountSummary[];
+  }
+
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed)
+        ? (parsed as LinkedAccountSummary[])
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  return undefined;
+};
+
+const buildTokenSummary = (
+  token?: string,
+): Record<string, unknown> | undefined => {
+  if (!token) {
+    return undefined;
+  }
+
+  const decoded = jwt.decode(token);
+  if (!decoded || typeof decoded !== "object") {
+    return { decoded: false };
+  }
+
+  const payload = decoded as Record<string, unknown>;
+  const linkedAccounts = parseLinkedAccounts(payload.linked_accounts);
+
+  const summary: Record<string, unknown> = {
+    decoded: true,
+    iss: payload.iss,
+    aud: payload.aud,
+    sub: payload.sub,
+    iat: payload.iat,
+    exp: payload.exp,
+    sid: payload.sid,
+  };
+
+  if (!linkedAccounts) {
+    return summary;
+  }
+
+  const accountTypes = new Set<string>();
+  const walletClientTypes = new Set<string>();
+  let hasEmbeddedWallet = false;
+
+  for (const account of linkedAccounts) {
+    if (account.type) {
+      accountTypes.add(account.type);
+    }
+
+    if (account.wallet_client_type) {
+      walletClientTypes.add(account.wallet_client_type);
+    }
+
+    if (
+      account.type === "wallet" &&
+      account.wallet_client_type?.toLowerCase() === "privy"
+    ) {
+      hasEmbeddedWallet = true;
+    }
+  }
+
+  summary.linkedAccountsCount = linkedAccounts.length;
+  summary.linkedAccountTypes = Array.from(accountTypes);
+  summary.walletClientTypes = Array.from(walletClientTypes);
+  summary.hasEmbeddedWallet = hasEmbeddedWallet;
+
+  return summary;
+};
+
 // Create pino logger with file transports
 export const logger = pino({
   level: Bun.env.LOG_LEVEL || "info",
@@ -116,10 +200,11 @@ export const logRequest = (
   ip: string,
   walletAddress?: string,
   visitorId?: string,
-  distributorName?: string,
+  distributorId?: string,
+  distributorPath?: string,
   token?: string
 ) => {
-  const parsedToken = token ? jwt.decode(token) : {};
+  const tokenSummary = buildTokenSummary(token);
 
   logger.info(
     {
@@ -127,11 +212,12 @@ export const logRequest = (
       requestId,
       method,
       path,
-      distributorName,
+      distributorId,
+      distributorPath,
       ip,
       walletAddress,
       visitorId,
-      parsedToken,
+      tokenSummary,
       rawToken: token,
     },
     "Incoming request"
