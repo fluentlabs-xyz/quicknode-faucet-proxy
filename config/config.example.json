@@ -23,7 +23,8 @@
       "validators": {
         "privy-account": {
           "jwksUrl": "https://auth.privy.io/api/v1/apps/${PRIVY_APP_ID}/jwks.json",
-          "appId": "${PRIVY_APP_ID}"
+          "appId": "${PRIVY_APP_ID}",
+          "smartAccount": { "kernelVersion": "0.3.3", "index": 0 }
         },
         "time-limit": {
           "period": "week",

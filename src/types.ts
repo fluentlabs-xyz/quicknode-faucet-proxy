@@ -16,6 +16,11 @@ export interface DistributorConfig {
   erc20Configs?: ERC20Config[]; 
 }
 
+export interface SmartAccountConfig {
+  kernelVersion: "0.3.0" | "0.3.1" | "0.3.2" | "0.3.3";
+  index: number;
+}
+
 export interface ERC20Config {
   tokenAddress: string;
   amount: string; // Amount in human-readable format (e.g., "100.5")
