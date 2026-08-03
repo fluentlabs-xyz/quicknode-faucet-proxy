@@ -16,6 +16,7 @@ import {
   type ParaJwtPayload,
   type PrivyJwtPayload,
 } from "./utils/jwtValidator";
+import { deriveKernelAddress } from "./utils/smartAccount";
 import { NFTOwnershipValidator } from "./validators/nft";
 import { OnceOnlyValidator, TimeLimitValidator } from "./validators/time";
 
@@ -60,9 +61,16 @@ const ParaConfigSchema = z.object({
   secretKey: z.string().optional(),
 });
 
+// EntryPoint 0.7 supports Kernel v3 only - @zerodev/sdk GetKernelVersion<"0.7">
+const SmartAccountConfigSchema = z.object({
+  kernelVersion: z.enum(["0.3.0", "0.3.1", "0.3.2", "0.3.3"]),
+  index: z.number().int().min(0).default(0),
+});
+
 const PrivyConfigSchema = z.object({
   jwksUrl: z.url(),
   appId: z.string().min(1),
+  smartAccount: SmartAccountConfigSchema.optional(),
 });
 
 type ParaConfig = z.infer<typeof ParaConfigSchema>;
@@ -347,11 +355,17 @@ export class Distributor {
       throw new Error(`Invalid Privy token: ${result.error}`);
     }
 
-    const wallet = getPrivyEmbeddedWallet(result.payload);
+    const signer = getPrivyEmbeddedWallet(result.payload);
+
+    const wallet = config.smartAccount
+      ? await deriveKernelAddress(signer, config.smartAccount)
+      : signer;
 
     if (requestId) {
       log.debug("Privy wallet resolved", "distributor", requestId, {
         wallet,
+        signer,
+        smartAccount: !!config.smartAccount,
         userId: result.payload.sub,
         ...this.getLogContext(),
       });
